@@ -1,8 +1,30 @@
-===============================
-Purestorage.Pure1 Release Notes
-===============================
+============================
+Everpure.Pure1 Release Notes
+============================
 
 .. contents:: Topics
+
+v1.5.1
+======
+
+Bugfixes
+--------
+
+- all modules - a failure to create the Pure1 client or to reach Pure1 now reports its cause instead of a generic message.
+- all modules - the missing library message now names only ``py-pure-client``.
+- pure1_array_tags - Fix creating and updating tags with py-pure-client 1.70.0 and later.
+- pure1_array_tags - Include the Pure1 error context in failure messages.
+- pure1_array_tags - Report an unknown array name with the Pure1 error message instead of a traceback.
+- pure1_info - A 403 answer returns that subset empty with a warning.
+- pure1_info - An API error now fails with the API message instead of a traceback.
+- pure1_info - Fixed ``AttributeError`` on ``get_array_tags`` in the ``appliances`` and ``all`` subsets.
+- pure1_info - Fixed bandwidth values of the ``appliances`` subset, which were 100 times too small.
+- pure1_info - Fixed the ``appliances`` subset failing for arrays with tags, an unknown operating system or a failed metric call.
+- pure1_info - Fixed the ``invoices`` subset failing on invoices with unset fields or line components.
+- pure1_info - Fixed the ``subscriptions`` subset failing for organizations with a subscription license.
+- pure1_info - License ``location`` now comes from the license site address and ``energy_usage`` is always null.
+- pure1_info - Subscription ``org_name`` and invoice ``date`` and ``end_user_name`` are no longer always null.
+- pure1_pods - A stretched pod is now listed under each of its arrays, or only under the requested array when ``array`` is set.
 
 v1.5.0
 ======
@@ -22,7 +44,7 @@ Bugfixes
 New Modules
 -----------
 
-- purestorage.pure1.pure1_drives - Collect array drives information from Pure1
+- everpure.pure1.pure1_drives - Collect array drives information from Pure1
 
 v1.4.0
 ======
@@ -45,10 +67,10 @@ Minor Changes
 New Modules
 -----------
 
-- purestorage.pure1.pure1_nics - Collect network interface information from Pure1
-- purestorage.pure1.pure1_pods - Collect FlashArray pod information from Pure1
-- purestorage.pure1.pure1_ports - Collect FlashArray port information from Pure1
-- purestorage.pure1.pure1_volumes - Collect volumes information from Pure1
+- everpure.pure1.pure1_nics - Collect network interface information from Pure1
+- everpure.pure1.pure1_pods - Collect FlashArray pod information from Pure1
+- everpure.pure1.pure1_ports - Collect FlashArray port information from Pure1
+- everpure.pure1.pure1_volumes - Collect volumes information from Pure1
 
 v1.2.0
 ======
@@ -70,8 +92,8 @@ Minor Changes
 New Modules
 -----------
 
-- purestorage.pure1.pure1_alerts - Collect array alerts from Pure1 based on severity
-- purestorage.pure1.pure1_network_interfaces - Collect array netowrk interface details from Pure1
+- everpure.pure1.pure1_alerts - Collect array alerts from Pure1 based on severity
+- everpure.pure1.pure1_network_interfaces - Collect array netowrk interface details from Pure1
 
 v1.0.0
 ======
