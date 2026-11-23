@@ -1,8 +1,8 @@
-<a href="https://github.com/Everpure-Ansible/Pure1-Collection/releases/latest"><img src="https://img.shields.io/github/v/tag/everpure-Ansible/Pure1-Collection?label=release">
-<a href="COPYING.GPLv3"><img src="https://img.shields.io/badge/license-GPL%20v3.0-brightgreen.svg"></a>
-<img src="https://cla-assistant.io/readme/badge/Everpure-Ansible/Pure1-Collection">
-<img src="https://github.com/everpure-Ansible/Pure1-Collection/workflows/Everpure%20Ansible%20CI/badge.svg">
-<a href="https://github.com/psf/black"><img src="https://img.shields.io/badge/code%20style-black-000000.svg"></a>
+[![Release](https://img.shields.io/github/v/tag/Everpure-Ansible/Pure1-Collection?label=release)](https://github.com/Everpure-Ansible/Pure1-Collection/releases/latest)
+[![License](https://img.shields.io/badge/license-GPL%20v3.0-brightgreen.svg)](https://github.com/Everpure-Ansible/Pure1-Collection/blob/master/COPYING.GPLv3)
+[![CLA assistant](https://cla-assistant.io/readme/badge/Everpure-Ansible/Pure1-Collection)](https://cla-assistant.io/Everpure-Ansible/Pure1-Collection)
+[![Everpure Ansible CI](https://github.com/Everpure-Ansible/Pure1-Collection/workflows/Everpure%20Ansible%20CI/badge.svg)](https://github.com/Everpure-Ansible/Pure1-Collection/actions)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 # Everpure Pure1 Collection
 
@@ -12,16 +12,16 @@ The Everpure Pure1 collection consists of the latest versions of the Pure1 modul
 
 ## Requirements
 
-- Ansible 2.16.0 or later
 - Authorized API Application ID for Everpure Pure1 and associated Private Key
   Refer to Everpure documentation on how to create these.
-- python >= 3.9 
-- py-pure-client
-- datetime
+- python >= 3.9
+- py-pure-client >= 1.99.0
 
 ## Installation
 
-Before using this collection, you need to install it with the Ansible Galaxy command-line tool:
+As Red Hat Ansible Certified Content, this collection is available from
+[Red Hat Ansible Automation Hub](https://console.redhat.com/ansible/automation-hub/collections/published/everpure/pure1).
+Once your Automation Hub credentials are configured in `ansible.cfg`, install it with:
 
 ```
 ansible-galaxy collection install everpure.pure1
@@ -34,7 +34,7 @@ collections:
   - name: everpure.pure1
 ```
 
-Note that if you install the collection from Ansible Galaxy, it will not be upgraded automatically when you upgrade the Ansible package. 
+Note that the collection is not upgraded automatically when you upgrade the Ansible Automation Platform.
 
 To upgrade the collection to the latest available version, run the following command:
 
@@ -48,7 +48,23 @@ You can also install a specific version of the collection, for example, if you n
 ansible-galaxy collection install everpure.pure1:==1.0.0
 ```
 
-See [using Ansible collections](https://docs.ansible.com/ansible/devel/user_guide/collections_using.html) for more details.
+For configuring Automation Hub as a collection source, see
+[Configuring Red Hat automation hub as your primary source](https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.4/html/getting_started_with_automation_hub/configure-hub-primary).
+
+The collection is also published on
+[Ansible Galaxy](https://galaxy.ansible.com/ui/repo/published/everpure/pure1/)
+for community users. See
+[using Ansible collections](https://docs.ansible.com/ansible/devel/user_guide/collections_using.html)
+for more details.
+
+## Use Cases
+
+This collection can be used to report on a fleet of Everpure arrays from Pure1 and to manage array tags in Pure1, either on its own or as part of larger playbooks. For example:
+* Collect fleet-wide information from Pure1: appliances, subscriptions and subscription licenses, support contracts, invoices and environmental data
+* List the volumes, pods, drives, ports and network interfaces of the whole fleet or of a single array
+* Collect open or closed alerts of a chosen severity, for the whole fleet or for a single array
+* Collect historical capacity and performance metrics for volumes
+* Create, update and remove array tags in Pure1
 
 ### Example Playbook
 ```yaml
@@ -81,10 +97,14 @@ Only the latest release of this collection is supported.
 As Red Hat Ansible Certified Content, this collection is entitled to support through the Ansible Automation Platform (AAP) using the **Create issue** button on the top right corner. This is the Primary Support Route for a Certified Collection.
 
 Community-Only help may be available on the [Ansible Forum](https://forum.ansible.com/) or raise a [GitHub issue](https://github.com/Everpure-Ansible/Pure1-Collection/issues) in the Collection repo.
- 
+
 ## Release Notes
 
-Release notes for this collection can be found [here](https://github.com/Everpure-Ansible/Pure1-Collection/releases)
+The full changelog is shipped with the collection as `CHANGELOG.rst` and is also available
+[in the repository](https://github.com/Everpure-Ansible/Pure1-Collection/blob/master/CHANGELOG.rst).
+
+Per-release notes can be found on the
+[releases page](https://github.com/Everpure-Ansible/Pure1-Collection/releases).
 
 ## Related Information
 ### Available Modules
@@ -93,13 +113,14 @@ Release notes for this collection can be found [here](https://github.com/Everpur
 - pure1_array_tags - Manage array tags for managed devices in Pure1
 - pure1_drives - Get array drives information from Pure1
 - pure1_info - Get information on fleet configuration
+- pure1_network_interfaces - Get array network interface details from Pure1 (deprecated, to be removed in version 2.0.0: use pure1_nics instead)
 - pure1_nics - Get network interface information from Pure1
 - pure1_pods - Get FlashArray pod information from Pure1
 - pure1_ports - Get port information from Pure1
 - pure1_volume_metrics - Get FlashArray volume metrics from Pure1
 - pure1_volumes - Get FlashArray volume information from Pure1
 
-## License
+## License Information
 
 [BSD-2-Clause](https://directory.fsf.org/wiki?title=License:FreeBSD)
 
@@ -107,4 +128,4 @@ Release notes for this collection can be found [here](https://github.com/Everpur
 
 ## Author
 
-This collection was created in 2020 by [Simon Dodsley](https://github.com/sdodsley) for, and on behalf of, the [Everpure Ansible Team](pure-ansible-team@everpuredata.com)
+This collection was created in 2020 by [Simon Dodsley](https://github.com/sdodsley) for, and on behalf of, the [Everpure Ansible Team](mailto:pure-ansible-team@everpuredata.com)
