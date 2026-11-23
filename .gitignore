@@ -1,7 +1,7 @@
 *.tar.gz
 *.pyc
 .pylintrc
-collections/ansible_collections/purestorage/pure1/tests/output/*
+tests/output/
 .coverage
 coverage.xml
 htmlcov/

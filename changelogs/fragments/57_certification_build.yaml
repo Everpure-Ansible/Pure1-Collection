@@ -1,0 +1,7 @@
+minor_changes:
+  - "CI - the certification workflow now builds the collection and runs sanity and ansible-lint against the built artifact."
+  - "README - installation leads with Red Hat Ansible Automation Hub, badges are markdown, links are full URLs and ``pure1_network_interfaces`` is in the module list."
+  - "collection - added ``build_ignore`` to ``galaxy.yml`` so the published tarball holds only user-facing content; ``changelogs/changelog.yaml`` still ships."
+  - "collection - added ``tests/config.yml`` declaring ``python_requires`` of ``>=3.9`` and an ``.ansible-lint`` file with the production profile."
+  - "collection - removed the ``playbooks/roles`` symlink, the empty ``playbooks`` and ``roles`` scaffolding, the stale root ``runtime.yml`` and the empty ``plugins/inventory`` package."
+  - "requirements - ``requirements.txt`` declares ``py-pure-client >= 1.99.0`` and no longer lists ``datetime``."

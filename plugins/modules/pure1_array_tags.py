@@ -52,8 +52,8 @@ EXAMPLES = r"""
   everpure.pure1.pure1_array_tags:
     name: foo
     tag:
-    - 'key1:value1'
-    - 'key2:value2'
+      - 'key1:value1'
+      - 'key2:value2'
     app_id: 'pure1:apikey:P3nkAt46lmXMBHLV'
     key_file: '/home/private.pem'
     password: PassW0rd!
@@ -62,7 +62,7 @@ EXAMPLES = r"""
   everpure.pure1.pure1_array_tags:
     name: foo
     tag:
-    - 'key1:value1'
+      - 'key1:value1'
     app_id: 'pure1:apikey:P3nkAt46lmXMBHLV'
     key_file: '/home/private.pem'
     password: PassW0rd!
@@ -72,7 +72,7 @@ EXAMPLES = r"""
   everpure.pure1.pure1_array_tags:
     name: foo
     tag:
-    - 'key1:value2'
+      - 'key1:value2'
     app_id: 'pure1:apikey:P3nkAt46lmXMBHLV'
     key_file: '/home/private.pem'
     password: PassW0rd!

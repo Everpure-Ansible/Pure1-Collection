@@ -37,3 +37,106 @@ jobs:
     #   ansible-core-version: '2.17.0'
     #   python-versions: '["3.7", "3.8", "3.9", "3.10", "3.11", "3.12"]'
     #   collection-root: 'ansible_collections/junipernetworks/junos'
+
+  # The checker above runs against the source tree. Automation Hub runs against
+  # the built artifact, which galaxy.yml build_ignore strips content from - so
+  # the two see different collections. everpure.flasharray 1.45.0 was rejected
+  # for exactly that gap: build_ignore removed tests/unit, but the sanity ignore
+  # file that referenced those files still shipped, and "ignores" errors on an
+  # entry whose target does not exist. This job builds the collection the way
+  # Automation Hub receives it and runs sanity on that.
+  sanity-on-built-artifact:
+    name: Sanity on built artifact (ansible-core ${{ matrix.ansible }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 2.16 is the lowest version requires_ansible allows and what a
+        # reviewer will use (it selects tests/sanity/ignore-2.16.txt if
+        # present); 2.18 and 2.20 are the AAP execution-environment streams
+        # and 2.21 is the newest release that runs on Python 3.12 (2.22
+        # needs 3.13).  Python 3.12 is the one interpreter all of them
+        # support.
+        ansible: ["2.16", "2.18", "2.20", "2.21"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ansible-core ${{ matrix.ansible }}
+        run: pip install "ansible-core>=${{ matrix.ansible }},<${{ matrix.ansible }}.99"
+
+      - name: Build the collection
+        run: ansible-galaxy collection build --output-path /tmp/build
+
+      - name: Extract the artifact into a collection tree
+        run: |
+          mkdir -p /tmp/tree/ansible_collections/everpure/pure1
+          tar xzf /tmp/build/*.tar.gz \
+            -C /tmp/tree/ansible_collections/everpure/pure1
+
+      - name: Fail if non user-facing files were shipped
+        run: |
+          cd /tmp/tree/ansible_collections/everpure/pure1
+          # Each name is tested on its own: one ls of the whole list fails as
+          # soon as a single name is absent, whatever else it found.
+          for path in *.tar.gz *.tgz *.zip .gitignore .git-blame-ignore-revs \
+                      .yamllint pytest.ini settings.json README.rst .github \
+                      changelogs/.plugin-cache.yaml changelogs/config.yaml \
+                      changelogs/fragments tests/unit tests/README.md; do
+            if [ -e "$path" ]; then
+              echo "::error::$path was included in the build."
+              echo "Add it to build_ignore in galaxy.yml."
+              exit 1
+            fi
+          done
+          # A symlink in the artifact is recorded in FILES.json as a plain
+          # directory with a null checksum, so nothing behind it is verified,
+          # and scanners routinely skip symlinks.
+          if [ -n "$(find . -type l)" ]; then
+            echo "::error::The artifact contains symlinks:"
+            find . -type l
+            exit 1
+          fi
+          # An empty directory is scaffolding, not content. It ships when
+          # build_ignore strips every file in it, such as a lone .keep.
+          if [ -n "$(find . -type d -empty)" ]; then
+            echo "::error::The artifact contains empty directories:"
+            find . -type d -empty
+            echo "Delete them, or add each directory itself to build_ignore."
+            exit 1
+          fi
+          echo "Artifact contains only user-facing content."
+
+      # everpure.flasharray 1.45.1 shipped with a merged fragment that had
+      # never been rendered, so a change present in the artifact was missing
+      # from the release notes. galaxy.yml and CHANGELOG.rst must agree.
+      - name: Fail if the changelog has no entry for this version
+        run: |
+          cd /tmp/tree/ansible_collections/everpure/pure1
+          # galaxy.yml is not in the artifact - ansible-galaxy replaces it with
+          # MANIFEST.json, which carries the version under collection_info.
+          version="$(python -c 'import json;print(json.load(open("MANIFEST.json"))["collection_info"]["version"])')"
+          if ! grep -q "^v${version}$" CHANGELOG.rst; then
+            echo "::error::CHANGELOG.rst has no v${version} section."
+            echo "Run 'antsibull-changelog release' before tagging."
+            exit 1
+          fi
+          echo "CHANGELOG.rst documents v${version}."
+
+      - name: Run sanity against the artifact
+        run: |
+          cd /tmp/tree/ansible_collections/everpure/pure1
+          ansible-test sanity --python 3.12
+
+      # ansible-lint reads the collection's own config, so excluding a lint
+      # config from the build changes what the artifact is judged against.
+      # This is what surfaced 24 yaml[indentation] findings in the
+      # everpure.flasharray 1.45.1 review after .yamllint stopped shipping.
+      - name: Run ansible-lint against the artifact
+        run: |
+          pip install ansible-lint
+          cd /tmp/tree/ansible_collections/everpure/pure1
+          ansible-lint --profile production
