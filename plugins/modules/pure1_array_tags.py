@@ -81,6 +81,8 @@ EXAMPLES = r"""
 RETURN = r"""
 """
 
+import inspect
+
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     get_pure1,
@@ -88,23 +90,61 @@ from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
 )
 
 
+def _error_text(res):
+    """Return the message and context of a failed API answer"""
+    errors = getattr(res, "errors", None)
+    if errors:
+        parts = [
+            getattr(errors[0], "message", None),
+            getattr(errors[0], "context", None),
+        ]
+        text = ": ".join([str(part) for part in parts if part])
+        if text:
+            return text
+    return "HTTP status {0}".format(getattr(res, "status_code", None))
+
+
+def _add_tag(tags, key, value):
+    """Add a tag to the list to write, the last value given for a key wins"""
+    for item in tags:
+        if item["key"] == key:
+            item["value"] = value
+            return
+    tags.append({"key": key, "value": value})
+
+
+def _put_tags(module, pure_1, tags):
+    """Write Array Tags"""
+    # py-pure-client 1.70.0 and later take the tags as tag_put, not tag
+    keyword = "tag_put"
+    try:
+        params = inspect.signature(pure_1.put_arrays_tags).parameters
+        if "tag" in params and "tag_put" not in params:
+            keyword = "tag"
+    except (TypeError, ValueError):
+        pass
+    return pure_1.put_arrays_tags(
+        resource_names=[module.params["name"]], **{keyword: tags}
+    )
+
+
 def create_tag(module, pure_1):
     """Create Array Tag"""
     changed = True
     if not module.check_mode:
+        tags = []
         for tag in range(0, len(module.params["tag"])):
             key = module.params["tag"][tag].split(":")[0]
             value = module.params["tag"][tag].split(":")[1]
-            tag_kvp = {"key": key, "value": value}
-            res = pure_1.put_arrays_tags(
-                resource_names=[module.params["name"]], tag=tag_kvp
-            )
+            _add_tag(tags, key, value)
+        if tags:
+            res = _put_tags(module, pure_1, tags)
             if res.status_code != 200:
                 module.fail_json(
                     msg="Failed to add tag KVP {0} to array {1}. Error: {2}".format(
-                        module.params["tag"][tag],
+                        ", ".join(module.params["tag"]),
                         module.params["name"],
-                        res.errors[0].message,
+                        _error_text(res),
                     )
                 )
     module.exit_json(changed=changed)
@@ -114,6 +154,7 @@ def update_tag(module, pure_1, current_tags):
     """Update Array Tag"""
     changed = False
     if not module.check_mode:
+        tags = []
         for tag in range(0, len(module.params["tag"])):
             tag_exists = False
             for current_tag in range(0, len(current_tags)):
@@ -128,37 +169,23 @@ def update_tag(module, pure_1, current_tags):
                     ):
                         key = module.params["tag"][tag].split(":")[0]
                         value = module.params["tag"][tag].split(":")[1]
-                        tag_kvp = {"key": key, "value": value}
-                        res = pure_1.put_arrays_tags(
-                            resource_names=[module.params["name"]], tag=tag_kvp
-                        )
-                        if res.status_code == 200:
-                            changed = True
-                        else:
-                            module.fail_json(
-                                msg="Failed to update tag '{0}' from volume {1}. Error: {2}".format(
-                                    module.params["tag"][tag].split(":")[0],
-                                    module.params["name"],
-                                    res.errors[0].message,
-                                )
-                            )
+                        _add_tag(tags, key, value)
             if not tag_exists:
                 key = module.params["tag"][tag].split(":")[0]
                 value = module.params["tag"][tag].split(":")[1]
-                tag_kvp = {"key": key, "value": value}
-                res = pure_1.put_arrays_tags(
-                    resource_names=[module.params["name"]], tag=tag_kvp
-                )
-                if res.status_code == 200:
-                    changed = True
-                else:
-                    module.fail_json(
-                        msg="Failed to add tag KVP {0} to volume {1}. Error: {2}".format(
-                            module.params["tag"][tag].split(":")[0],
-                            module.params["name"],
-                            res.errors[0].message,
-                        )
+                _add_tag(tags, key, value)
+        if tags:
+            res = _put_tags(module, pure_1, tags)
+            if res.status_code == 200:
+                changed = True
+            else:
+                module.fail_json(
+                    msg="Failed to update tags '{0}' on array {1}. Error: {2}".format(
+                        ", ".join([item["key"] for item in tags]),
+                        module.params["name"],
+                        _error_text(res),
                     )
+                )
     module.exit_json(changed=changed)
 
 
@@ -174,7 +201,7 @@ def delete_tag(module, pure_1, current_tags):
                 ):
                     res = pure_1.delete_arrays_tags(
                         resource_names=[module.params["name"]],
-                        keys=module.params["tag"][tag].split(":")[0],
+                        keys=[module.params["tag"][tag].split(":")[0]],
                     )
                     if res.status_code == 200:
                         changed = True
@@ -183,7 +210,7 @@ def delete_tag(module, pure_1, current_tags):
                             msg="Failed to remove tag KVP '{0}' from volume {1}. Error: {2}".format(
                                 module.params["tag"][tag],
                                 module.params["name"],
-                                res.errors[0].message,
+                                _error_text(res),
                             )
                         )
     module.exit_json(changed=changed)
@@ -204,13 +231,15 @@ def main():
     state = module.params["state"]
     pure_1 = get_pure1(module)
 
-    array = pure_1.get_arrays()
+    res = pure_1.get_arrays_tags(resource_names=[module.params["name"]])
 
-    if array.status_code != 200:
-        module.fail_json(msg="Array {0} does not exist.".format(module.params["name"]))
-    current_tags = list(
-        pure_1.get_arrays_tags(resource_names=[module.params["name"]]).items
-    )
+    if res.status_code != 200:
+        module.fail_json(
+            msg="Failed to get tags of array {0}. Error: {1}".format(
+                module.params["name"], _error_text(res)
+            )
+        )
+    current_tags = list(res.items)
 
     if state == "present" and not current_tags:
         create_tag(module, pure_1)
