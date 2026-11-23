@@ -71,10 +71,19 @@ def generate_pods_dict(module, pure_1):
     else:
         pods = list(pure_1.get_pods().items)
     for pod in range(0, len(pods)):
-        array = pods[pod].arrays[0].name
-        pods_info[array] = []
-    for pod in range(0, len(pods)):
-        array = pods[pod].arrays[0].name
+        # A stretched pod is on two arrays and is listed under each of them
+        arrays = []
+        for array in getattr(pods[pod], "arrays", None) or []:
+            name = getattr(array, "name", None)
+            if name and name not in arrays:
+                arrays.append(name)
+        if module.params["array"]:
+            requested = [
+                array
+                for array in arrays
+                if array.lower() == module.params["array"].lower()
+            ]
+            arrays = requested or arrays
         pod_name = pods[pod].name
         pod_details = {
             pod_name: {
@@ -84,7 +93,8 @@ def generate_pods_dict(module, pure_1):
         }
         if getattr(pods[pod], "source", None):
             pod_details[pod_name]["source"] = pods[pod].source.name
-        pods_info[array].append(pod_details)
+        for array in arrays:
+            pods_info.setdefault(array, []).append(pod_details)
     return pods_info
 
 
