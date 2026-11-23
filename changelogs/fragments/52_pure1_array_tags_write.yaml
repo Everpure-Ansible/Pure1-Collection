@@ -1,4 +1,0 @@
-bugfixes:
-  - pure1_array_tags - Fix creating and updating tags with py-pure-client 1.70.0 and later.
-  - pure1_array_tags - Report an unknown array name with the Pure1 error message instead of a traceback.
-  - pure1_array_tags - Include the Pure1 error context in failure messages.

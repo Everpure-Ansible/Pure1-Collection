@@ -1,6 +1,6 @@
 namespace: everpure
 name: pure1
-version: 1.5.0
+version: 1.5.1
 readme: README.md
 authors:
   - Everpure Ansible Team <pure-ansible-team@everpuredata.com>

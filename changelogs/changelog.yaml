@@ -81,3 +81,39 @@ releases:
       name: pure1_drives
       namespace: ''
     release_date: '2026-06-23'
+  1.5.1:
+    changes:
+      bugfixes:
+      - all modules - a failure to create the Pure1 client or to reach Pure1 now reports
+        its cause instead of a generic message.
+      - all modules - the missing library message now names only ``py-pure-client``.
+      - pure1_array_tags - Fix creating and updating tags with py-pure-client 1.70.0
+        and later.
+      - pure1_array_tags - Include the Pure1 error context in failure messages.
+      - pure1_array_tags - Report an unknown array name with the Pure1 error message
+        instead of a traceback.
+      - pure1_info - A 403 answer returns that subset empty with a warning.
+      - pure1_info - An API error now fails with the API message instead of a traceback.
+      - pure1_info - Fixed ``AttributeError`` on ``get_array_tags`` in the ``appliances``
+        and ``all`` subsets.
+      - pure1_info - Fixed bandwidth values of the ``appliances`` subset, which were
+        100 times too small.
+      - pure1_info - Fixed the ``appliances`` subset failing for arrays with tags,
+        an unknown operating system or a failed metric call.
+      - pure1_info - Fixed the ``invoices`` subset failing on invoices with unset
+        fields or line components.
+      - pure1_info - Fixed the ``subscriptions`` subset failing for organizations
+        with a subscription license.
+      - pure1_info - License ``location`` now comes from the license site address
+        and ``energy_usage`` is always null.
+      - pure1_info - Subscription ``org_name`` and invoice ``date`` and ``end_user_name``
+        are no longer always null.
+      - pure1_pods - A stretched pod is now listed under each of its arrays, or only
+        under the requested array when ``array`` is set.
+    fragments:
+    - 51_pure1_info_hotfix.yaml
+    - 52_pure1_array_tags_write.yaml
+    - 53_get_pure1_error_reporting.yaml
+    - 54_sdk_contract_test.yaml
+    - 55_pure1_pods_stretched.yaml
+    release_date: '2026-11-23'
