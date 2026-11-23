@@ -303,7 +303,11 @@ def resolve_volumes(module, pure_1):
         kwargs["filter"] = "arrays.name=" + filter_string(module.params["array"])
     if module.params["volumes"]:
         kwargs["names"] = module.params["volumes"]
-    volumes = get_items(module, "list volumes", lambda: pure_1.get_volumes(**kwargs))
+
+    def list_volumes():
+        return pure_1.get_volumes(**kwargs)
+
+    volumes = get_items(module, "list volumes", list_volumes)
     if module.params["array"] and module.params["volumes"]:
         # Pure1 fails an unknown name, but only leaves out a named volume
         # that exists on another array. It matches names in any case.
