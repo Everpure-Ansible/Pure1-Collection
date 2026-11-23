@@ -32,18 +32,78 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
+import traceback
+
+PYPURECLIENT_IMP_ERR = None
 HAS_PYPURECLIENT = True
 try:
     from pypureclient import pure1
 except ImportError:
     HAS_PYPURECLIENT = False
+    PYPURECLIENT_IMP_ERR = traceback.format_exc()
 
 from os import environ
 import platform
+import re
+
+from ansible.module_utils.basic import missing_required_lib
+
+try:
+    from http.client import responses as HTTP_RESPONSES
+except ImportError:
+    HTTP_RESPONSES = {}
 
 TOKEN_EXCHANGE_URL = "https://api.pure1.purestorage.com/oauth2/1.0/token"
 VERSION = 1.0
 USER_AGENT_BASE = "Ansible"
+ERROR_TEXT_LIMIT = 500
+# A PEM block and a JSON web token (ID token, bearer token) are never reported
+SECRET_PATTERNS = (
+    re.compile(r"-----BEGIN.*"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{8,}[A-Za-z0-9_.=-]*"),
+)
+
+
+def _condense(module, text):
+    """Return an error text as one bounded line with no secret in it"""
+    # The SDK appends the response headers and body to a failed request
+    text = str(text).split("HTTP response headers:", 1)[0]
+    text = text.split("HTTP response body:", 1)[0]
+    # and the whole body to a token response it cannot parse
+    text = "".join(text.partition("Unable to parse response.")[:2])
+    for secret in (
+        module.params.get("password"),
+        environ.get("PURE1_PRIVATE_PASSWORD"),
+        environ.get("PURE1_PRIVATE_KEY_PASSWORD"),
+    ):
+        if secret:
+            text = text.replace(secret, "********")
+    text = " ".join(text.split())
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub("********", text)
+    if len(text) > ERROR_TEXT_LIMIT:
+        text = text[:ERROR_TEXT_LIMIT] + "..."
+    return text
+
+
+def _error_text(module, error):
+    """Return the type of an exception and its condensed text"""
+    name = type(error).__name__
+    text = _condense(module, error)
+    # PureError already starts its text with its own name
+    if not text.startswith(name + ":"):
+        text = "%s: %s" % (name, text) if text else name
+    return text
+
+
+def _response_message(module, res):
+    """Return the message of an error response or its HTTP status text"""
+    for error in getattr(res, "errors", None) or []:
+        message = getattr(error, "message", None) or getattr(error, "context", None)
+        text = _condense(module, message or "")
+        if text:
+            return text
+    return HTTP_RESPONSES.get(res.status_code, "no message returned")
 
 
 def get_pure1(module):
@@ -71,8 +131,11 @@ def get_pure1(module):
                         private_key_file=key_file,
                     )
                 pure_1._api_client.set_default_header("User-Agent", user_agent)
-            except Exception:
-                module.fail_json(msg="Unknown failure. Please contact Pure Support")
+            except Exception as error:
+                module.fail_json(
+                    msg="Failed to create the Pure1 client: %s"
+                    % _error_text(module, error)
+                )
         elif environ.get("PURE1_APP_ID") and environ.get("PURE1_PRIVATE_KEY_FILE"):
             try:
                 if module.params["password"]:
@@ -87,8 +150,11 @@ def get_pure1(module):
                         private_key_file=key_file,
                     )
                 pure_1._api_client.set_default_header("User-Agent", user_agent)
-            except Exception:
-                module.fail_json(msg="Unknown failure. Please contact Pure Support")
+            except Exception as error:
+                module.fail_json(
+                    msg="Failed to create the Pure1 client: %s"
+                    % _error_text(module, error)
+                )
         else:
             module.fail_json(
                 msg="You must set PURE1_APP_ID and PURE1_PRIVATE_KEY_FILE environment variables "
@@ -98,12 +164,17 @@ def get_pure1(module):
             res = pure_1.get_arrays()
             if res.status_code != 200:
                 module.fail_json(
-                    msg="Pure1 authentication failed. Check your credentials"
+                    msg="Pure1 request get_arrays failed (HTTP %s): %s"
+                    % (res.status_code, _response_message(module, res))
                 )
-        except Exception:
-            module.fail_json(msg="Pure1 authentication failed. Check your credentials")
+        except Exception as error:
+            module.fail_json(
+                msg="Pure1 request get_arrays failed: %s" % _error_text(module, error)
+            )
     else:
-        module.fail_json(msg="py-pure-client and/or requests are not installed.")
+        module.fail_json(
+            msg=missing_required_lib("py-pure-client"), exception=PYPURECLIENT_IMP_ERR
+        )
     return pure_1
 
 
