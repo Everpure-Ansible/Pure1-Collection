@@ -1,0 +1,3 @@
+bugfixes:
+  - all modules - a failure to create the Pure1 client or to reach Pure1 now reports its cause instead of a generic message.
+  - all modules - the missing library message now names only ``py-pure-client``.
