@@ -17,3 +17,56 @@ dependencies: {}
 repository: https://github.com/Everpure-Ansible/Pure1-Collection
 documentation: https://github.com/Everpure-Ansible/Pure1-Collection
 issues: https://github.com/Everpure-Ansible/Pure1-Collection/issues
+# Anything shipped here is installed onto every customer system and pulled into
+# execution environment images, so the tarball is kept to user-facing content.
+# changelogs/changelog.yaml is deliberately NOT excluded - it ships alongside
+# the rendered CHANGELOG.rst.
+build_ignore:
+  - tests/integration
+  - tests/unit
+  - extensions/molecule
+  - docs
+  - collections
+  - .github
+  - .ansible
+  - .tox
+  - .venv
+  - .agents
+  - .claude
+  - .vscode
+  - .pytest_cache
+  - .pre-commit-config.yaml
+  - htmlcov
+  # Written beside htmlcov by the unit-test run (pytest --cov)
+  - .coverage
+  - coverage.xml
+  # The sibling collections keep vendor catalogue metadata under this name;
+  # it is not Ansible configuration
+  - settings.json
+  # Development tooling with no meaning inside an installed collection
+  - pytest.ini
+  - .yamllint
+  - .pylintrc
+  - .gitignore
+  - .git-blame-ignore-revs
+  # Only changelogs/changelog.yaml is of use to a consumer. .plugin-cache.yaml
+  # is antsibull-changelog state, config.yaml is its configuration, and
+  # fragments are unreleased notes by definition.
+  - changelogs/.plugin-cache.yaml
+  - changelogs/config.yaml
+  - changelogs/fragments
+  # tests/unit is excluded above, so a tests/README.md documenting it would
+  # describe pytest paths that do not exist in the build
+  - tests/README.md
+  # MANIFEST declares README.md as the collection readme; README.rst is a
+  # second readme that Automation Hub and Galaxy never render
+  - README.rst
+  # Release archives. ansible-galaxy already skips its own
+  # everpure-pure1-*.tar.gz, but not one built under another namespace.
+  - "*.tar.gz"
+  - "*.tgz"
+  - "*.zip"
+  # Empty placeholders that keep otherwise-empty directories in git. The
+  # directory itself still ships, which the artifact job in certification.yml
+  # rejects.
+  - "**/.keep"
