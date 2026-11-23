@@ -228,11 +228,12 @@ def api_error(response):
     )
 
 
-def call_api(module, action, method, **kwargs):
+def call_api(module, action, request):
     # Returns (200, items) or (status, error text). An SDK error response has
     # no items attribute, so the status is checked before items is read.
+    # request makes the client call, so each call stays written out in full.
     try:
-        response = method(**kwargs)
+        response = request()
         status = getattr(response, "status_code", None)
         if status == 200:
             return status, list(response.items)
@@ -241,8 +242,8 @@ def call_api(module, action, method, **kwargs):
         module.fail_json(msg="Failed to %s: %s" % (action, str(err)))
 
 
-def get_items(module, action, method, **kwargs):
-    status, result = call_api(module, action, method, **kwargs)
+def get_items(module, action, request):
+    status, result = call_api(module, action, request)
     if status != 200:
         module.fail_json(msg="Failed to %s: %s" % (action, result))
     return result
@@ -250,7 +251,9 @@ def get_items(module, action, method, **kwargs):
 
 def list_volume_metrics(module, pure_1):
     metrics = get_items(
-        module, "list volume metrics", pure_1.get_metrics, resource_types=["volumes"]
+        module,
+        "list volume metrics",
+        lambda: pure_1.get_metrics(resource_types=["volumes"]),
     )
     available = []
     for metric in metrics:
@@ -300,7 +303,7 @@ def resolve_volumes(module, pure_1):
         kwargs["filter"] = "arrays.name=" + filter_string(module.params["array"])
     if module.params["volumes"]:
         kwargs["names"] = module.params["volumes"]
-    volumes = get_items(module, "list volumes", pure_1.get_volumes, **kwargs)
+    volumes = get_items(module, "list volumes", lambda: pure_1.get_volumes(**kwargs))
     if module.params["array"] and module.params["volumes"]:
         # Pure1 fails an unknown name, but only leaves out a named volume
         # that exists on another array. It matches names in any case.
@@ -324,13 +327,14 @@ def get_history(module, pure_1, volume_ids, start_time, end_time, skip_missing):
     status, result = call_api(
         module,
         "collect volume metrics",
-        pure_1.get_metrics_history,
-        aggregation=module.params["aggregation"],
-        resolution=module.params["resolution"],
-        start_time=start_time,
-        end_time=end_time,
-        names=module.params["metrics"],
-        resource_ids=volume_ids,
+        lambda: pure_1.get_metrics_history(
+            aggregation=module.params["aggregation"],
+            resolution=module.params["resolution"],
+            start_time=start_time,
+            end_time=end_time,
+            names=module.params["metrics"],
+            resource_ids=volume_ids,
+        ),
     )
     if status == 200:
         return result, []
