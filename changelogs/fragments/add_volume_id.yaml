@@ -1,3 +1,6 @@
 ---
 minor_changes:
   - pure1_volumes - Add volume Pure1 id (NAID) and full arrays list to returned data
+bugfixes:
+  - pure1_volumes - Fixed a failure for a volume on an array that has no FQDN.
+  - pure1_volumes - An array name containing a single quote no longer breaks the filter.

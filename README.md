@@ -96,6 +96,7 @@ Release notes for this collection can be found [here](https://github.com/Everpur
 - pure1_nics - Get network interface information from Pure1
 - pure1_pods - Get FlashArray pod information from Pure1
 - pure1_ports - Get port information from Pure1
+- pure1_volume_metrics - Get FlashArray volume metrics from Pure1
 - pure1_volumes - Get FlashArray volume information from Pure1
 
 ## License

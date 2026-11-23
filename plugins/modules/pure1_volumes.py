@@ -92,12 +92,17 @@ from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
 import time
 
 
+def filter_string(value):
+    # Pure1 filters escape a backslash or a single quote in a string with a backslash.
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
 def generate_volumes_dict(module, pure_1):
     volumes_info = {}
     if module.params["array"]:
         volumes = list(
             pure_1.get_volumes(
-                filter="arrays.name='" + module.params["array"] + "'"
+                filter="arrays.name=" + filter_string(module.params["array"])
             ).items
         )
     else:
@@ -120,7 +125,7 @@ def generate_volumes_dict(module, pure_1):
             "pod": [],
             "array": {
                 "name": volumes[volume].arrays[0].name,
-                "fqdn": volumes[volume].arrays[0].fqdn,
+                "fqdn": getattr(volumes[volume].arrays[0], "fqdn", None),
             },
             "arrays": [
                 {"name": array.name, "fqdn": getattr(array, "fqdn", None)}
