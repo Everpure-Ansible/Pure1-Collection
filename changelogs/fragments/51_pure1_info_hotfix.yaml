@@ -1,0 +1,10 @@
+bugfixes:
+  - pure1_info - Fixed ``AttributeError`` on ``get_array_tags`` in the ``appliances`` and ``all`` subsets.
+  - pure1_info - Fixed the ``appliances`` subset failing for arrays with tags, an unknown operating system or a failed metric call.
+  - pure1_info - Fixed bandwidth values of the ``appliances`` subset, which were 100 times too small.
+  - pure1_info - Fixed the ``subscriptions`` subset failing for organizations with a subscription license.
+  - pure1_info - License ``location`` now comes from the license site address and ``energy_usage`` is always null.
+  - pure1_info - Subscription ``org_name`` and invoice ``date`` and ``end_user_name`` are no longer always null.
+  - pure1_info - Fixed the ``invoices`` subset failing on invoices with unset fields or line components.
+  - pure1_info - An API error now fails with the API message instead of a traceback.
+  - pure1_info - A 403 answer returns that subset empty with a warning.

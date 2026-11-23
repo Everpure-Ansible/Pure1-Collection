@@ -76,10 +76,64 @@ import datetime
 import time
 
 
+class Pure1ResponseError(Exception):
+    """An error answer from Pure1, reported by collect_subset"""
+
+    def __init__(self, res):
+        super(Pure1ResponseError, self).__init__()
+        self.res = res
+
+
+def checked(res):
+    """Return an answer that can be read, raise for an error answer"""
+    if res.status_code != 200:
+        raise Pure1ResponseError(res)
+    return res
+
+
+def response_error(res):
+    """Return the status and the API message of an error answer as text"""
+    text = "Status code: {0}.".format(res.status_code)
+    errors = getattr(res, "errors", None)
+    if errors:
+        parts = [
+            getattr(errors[0], "message", None),
+            getattr(errors[0], "context", None),
+        ]
+        parts = [str(part) for part in parts if part]
+        if parts:
+            text += " Error: " + ": ".join(parts)
+    return text
+
+
+def plain_dict(model, fields):
+    """Return the fields of a model as plain values, None if none is set"""
+    plain = {field: getattr(model, field, None) for field in fields}
+    if all(value is None for value in plain.values()):
+        return None
+    return plain
+
+
+def format_utc(epoch):
+    """Return a millisecond epoch as a UTC time string, None if it is not set"""
+    if epoch is None:
+        return None
+    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(epoch / 1000))
+
+
+def current_metric_dict(metric):
+    """Return a license metric as plain values, None for what is not set"""
+    return {
+        "data": getattr(metric, "data", None),
+        "unit": getattr(metric, "unit", None),
+        "metric": getattr(getattr(metric, "metric", None), "name", None),
+    }
+
+
 def generate_default_dict(pure_1):
     default_info = {}
     fb_count = fa_count = os_count = 0
-    appliances = list(pure_1.get_arrays().items)
+    appliances = list(checked(pure_1.get_arrays()).items)
     for appliance in range(0, len(appliances)):
         if appliances[appliance].os in ["Purity//FA", "Purity"]:
             fa_count += 1
@@ -90,18 +144,20 @@ def generate_default_dict(pure_1):
     default_info["FlashArrays"] = fa_count
     default_info["FlashBlades"] = fb_count
     default_info["ObjectEngines"] = os_count
-    default_info["volumes"] = pure_1.get_volumes().total_item_count
-    default_info["volume_snapshots"] = pure_1.get_volume_snapshots().total_item_count
-    default_info["filesystems"] = pure_1.get_file_systems().total_item_count
-    default_info["filesystem_snapshots"] = (
-        pure_1.get_file_system_snapshots().total_item_count
-    )
-    default_info["buckets"] = pure_1.get_buckets().total_item_count
-    default_info["directories"] = pure_1.get_directories().total_item_count
-    default_info["pods"] = pure_1.get_pods().total_item_count
-    default_info["object_store_accounts"] = (
-        pure_1.get_object_store_accounts().total_item_count
-    )
+    default_info["volumes"] = checked(pure_1.get_volumes()).total_item_count
+    default_info["volume_snapshots"] = checked(
+        pure_1.get_volume_snapshots()
+    ).total_item_count
+    default_info["filesystems"] = checked(pure_1.get_file_systems()).total_item_count
+    default_info["filesystem_snapshots"] = checked(
+        pure_1.get_file_system_snapshots()
+    ).total_item_count
+    default_info["buckets"] = checked(pure_1.get_buckets()).total_item_count
+    default_info["directories"] = checked(pure_1.get_directories()).total_item_count
+    default_info["pods"] = checked(pure_1.get_pods()).total_item_count
+    default_info["object_store_accounts"] = checked(
+        pure_1.get_object_store_accounts()
+    ).total_item_count
     return default_info
 
 
@@ -135,82 +191,72 @@ def generate_subscription_assets_dict(pure_1):
 
 def generate_subscription_licenses_dict(pure_1):
     licenses_info = {}
-    licenses = list(pure_1.get_subscription_licenses().items)
+    licenses = list(checked(pure_1.get_subscription_licenses()).items)
     if licenses:
         for license in range(0, len(licenses)):
             name = licenses[license].name
-            start_date = time.strftime(
-                "%Y-%m-%d %H:%M:%S UTC",
-                time.gmtime(licenses[license].start_date / 1000),
+            location = plain_dict(
+                getattr(licenses[license], "site_address", None),
+                ("city", "state", "country"),
             )
-            expiration_date = time.strftime(
-                "%Y-%m-%d %H:%M:%S UTC",
-                time.gmtime(licenses[license].expiration_date / 1000),
-            )
-            last_updated = time.strftime(
-                "%Y-%m-%d %H:%M:%S UTC",
-                time.gmtime(licenses[license].last_updated_date / 1000),
+            pre_ratio = plain_dict(
+                getattr(licenses[license], "pre_ratio", None), ("data", "unit")
             )
             licenses_info[name] = {
-                "start_date": start_date,
-                "expiration_date": expiration_date,
-                "last_updated": last_updated,
-                "marketplace_partner": licenses[license].marketplace_partner.name,
-                "service_tier": licenses[license].service_tier,
-                "location": licenses[license].location,
-                "pre_ratio": licenses[license].pre_ratio,
-                "energy_usage": licenses[license].energy_usage,
-                "subscription": licenses[license].subscription.name,
-                "average_on_demand": {
-                    "data": licenses[license].average_on_demand.data,
-                    "unit": licenses[license].average_on_demand.unit,
-                    "metric": licenses[license].average_on_demand.metric.name,
-                },
-                "reservation": {
-                    "data": licenses[license].reservation.data,
-                    "unit": licenses[license].reservation.unit,
-                    "metric": licenses[license].reservation.metric.name,
-                },
-                "usage": {
-                    "data": licenses[license].usage.data,
-                    "unit": licenses[license].usage.unit,
-                    "metric": licenses[license].usage.metric.name,
-                },
-                "quarter_on_demand": {
-                    "data": licenses[license].quarter_on_demand.data,
-                    "unit": licenses[license].quarter_on_demand.unit,
-                    "metric": licenses[license].quarter_on_demand.metric.name,
-                },
+                "start_date": format_utc(
+                    getattr(licenses[license], "start_date", None)
+                ),
+                "expiration_date": format_utc(
+                    getattr(licenses[license], "expiration_date", None)
+                ),
+                "last_updated": format_utc(
+                    getattr(licenses[license], "last_updated_date", None)
+                ),
+                "marketplace_partner": getattr(
+                    getattr(licenses[license], "marketplace_partner", None),
+                    "name",
+                    None,
+                ),
+                "service_tier": getattr(licenses[license], "service_tier", None),
+                "location": location,
+                "pre_ratio": pre_ratio,
+                "energy_usage": None,
+                "subscription": getattr(
+                    getattr(licenses[license], "subscription", None), "name", None
+                ),
+                "average_on_demand": current_metric_dict(
+                    getattr(licenses[license], "average_on_demand", None)
+                ),
+                "reservation": current_metric_dict(
+                    getattr(licenses[license], "reservation", None)
+                ),
+                "usage": current_metric_dict(getattr(licenses[license], "usage", None)),
+                "quarter_on_demand": current_metric_dict(
+                    getattr(licenses[license], "quarter_on_demand", None)
+                ),
                 "resources": {},
             }
-            for resource in range(0, len(licenses[license].resources)):
-                res_name = licenses[license].resources[resource].name
-                res_start_time = time.strftime(
-                    "%Y-%m-%d %H:%M:%S UTC",
-                    time.gmtime(
-                        licenses[license].resources[resource].activation_time / 1000
-                    ),
-                )
+            resources = getattr(licenses[license], "resources", None) or []
+            for resource in range(0, len(resources)):
+                res_name = resources[resource].name
                 licenses_info[name]["resources"][res_name] = {
-                    "resource_type": licenses[license]
-                    .resources[resource]
-                    .resource_type,
-                    "fqdn": licenses[license].resources[resource].fqdn,
-                    "activation_time": res_start_time,
-                    "usage": {
-                        "data": licenses[license].resources[resource].usage.data,
-                        "unit": licenses[license].resources[resource].usage.unit,
-                        "metric": licenses[license]
-                        .resources[resource]
-                        .usage.metric.name,
-                    },
+                    "resource_type": getattr(
+                        resources[resource], "resource_type", None
+                    ),
+                    "fqdn": getattr(resources[resource], "fqdn", None),
+                    "activation_time": format_utc(
+                        getattr(resources[resource], "activation_time", None)
+                    ),
+                    "usage": current_metric_dict(
+                        getattr(resources[resource], "usage", None)
+                    ),
                 }
     return licenses_info
 
 
 def generate_subscriptions_dict(pure_1):
     subscriptions_info = {}
-    subscriptions = list(pure_1.get_subscriptions().items)
+    subscriptions = list(checked(pure_1.get_subscriptions()).items)
     if subscriptions:
         for subscription in range(0, len(subscriptions)):
             name = subscriptions[subscription].name
@@ -227,7 +273,11 @@ def generate_subscriptions_dict(pure_1):
                 "expiration_date": end_time,
                 "service": subscriptions[subscription].service,
                 "status": subscriptions[subscription].status,
-                "org_name": getattr(subscriptions[subscription], "org_name", None),
+                "org_name": getattr(
+                    getattr(subscriptions[subscription], "organization", None),
+                    "name",
+                    None,
+                ),
                 "partner_name": getattr(
                     subscriptions[subscription], "partner_name", None
                 ),
@@ -241,7 +291,7 @@ def generate_subscriptions_dict(pure_1):
 def generate_esg_dict(module, pure_1):
     esg_info = {}
     current_date = int(time.time() * 1000)
-    appliances = list(pure_1.get_assessment_sustainability_arrays().items)
+    appliances = list(checked(pure_1.get_assessment_sustainability_arrays()).items)
     for appliance in range(0, len(appliances)):
         name = appliances[appliance].name
         esg_info[name] = {
@@ -339,7 +389,9 @@ def generate_esg_dict(module, pure_1):
                     "%Y-%m-%d %H:%M:%S UTC",
                     time.gmtime(esg_info[name]["assessment"]["end"] / 1000),
                 )
-    insights = list(pure_1.get_assessment_sustainability_insights_arrays().items)
+    insights = list(
+        checked(pure_1.get_assessment_sustainability_insights_arrays()).items
+    )
     for insight in range(0, len(insights)):
         name = getattr(insights[insight].resource, "name", None)
         if name:
@@ -360,14 +412,16 @@ def generate_contract_dict(pure_1):
     contract_start_epoch = None
     contract_end_epoch = None
     current_date = int(time.time() * 1000)
-    appliances = list(pure_1.get_arrays().items)
+    appliances = list(checked(pure_1.get_arrays()).items)
     for appliance in range(0, len(appliances)):
         contract_state = "Expired"
         name = appliances[appliance].name
         contract_info[name] = {}
         contract_data = list(
-            pure_1.get_arrays_support_contracts(
-                filter="resource.name='" + name + "'"
+            checked(
+                pure_1.get_arrays_support_contracts(
+                    filter="resource.name='" + name + "'"
+                )
             ).items
         )
         if contract_data:
@@ -399,7 +453,10 @@ def generate_invoices_dict(module, pure_1):
         invoices = list(res.items)
         for invoice in range(0, len(invoices)):
             name = invoices[invoice].id
-            invoice_date = getattr(invoices[invoice], "date", None)
+            # py-pure-client names the field var_date, older releases _date
+            invoice_date = getattr(invoices[invoice], "var_date", None)
+            if not invoice_date:
+                invoice_date = getattr(invoices[invoice], "_date", None)
             invoice_due_date = getattr(invoices[invoice], "due_date", None)
             invoice_ship_date = getattr(invoices[invoice], "ship_date", None)
             if invoice_date:
@@ -420,6 +477,7 @@ def generate_invoices_dict(module, pure_1):
                 ).strftime("%Y-%m-%d")
             else:
                 inv_ship_date = None
+            subscription = getattr(invoices[invoice], "subscription", None)
 
             invoices_info[name] = {
                 "lines": [],
@@ -436,15 +494,12 @@ def generate_invoices_dict(module, pure_1):
                 "end_user_po": getattr(
                     invoices[invoice], "end_user_purchase_order", None
                 ),
-                "end_user_name": getattr(
-                    invoices[invoice], "end_user_purchase_name", None
-                ),
-                "subscription_id": getattr(invoices[invoice].subscription, "id", None),
-                "subscription_name": getattr(
-                    invoices[invoice].subscription, "name", None
-                ),
+                "end_user_name": getattr(invoices[invoice], "end_user_name", None),
+                "subscription_id": getattr(subscription, "id", None),
+                "subscription_name": getattr(subscription, "name", None),
             }
-            for line in range(0, len(invoices[invoice].lines)):
+            lines = getattr(invoices[invoice], "lines", None) or []
+            for line in range(0, len(lines)):
                 line_start_date = getattr(
                     invoices[invoice].lines[line], "start_date", None
                 )
@@ -461,6 +516,17 @@ def generate_invoices_dict(module, pure_1):
                     ).strftime("%Y-%m-%d")
                 else:
                     end_date = None
+                tax = getattr(invoices[invoice].lines[line], "tax", None)
+                components = getattr(invoices[invoice].lines[line], "components", None)
+                if components:
+                    components = [
+                        {
+                            "item": getattr(component, "item", None),
+                            "quantity": getattr(component, "quantity", None),
+                            "description": getattr(component, "description", None),
+                        }
+                        for component in components
+                    ]
                 invoices_info[name]["lines"].append(
                     {
                         "item": getattr(invoices[invoice].lines[line], "item", None),
@@ -472,30 +538,59 @@ def generate_invoices_dict(module, pure_1):
                         ),
                         "start_date": start_date,
                         "end_date": end_date,
-                        "components": invoices[invoice].lines[line]["components"],
+                        "components": components,
                         "unit_price": getattr(
                             invoices[invoice].lines[line], "unit_price", 0
                         ),
                         "amount": getattr(invoices[invoice].lines[line], "amount", 0),
-                        "tax_percentage": getattr(
-                            invoices[invoice].lines[line].tax, "percentage", 0
+                        "tax_percentage": (
+                            getattr(tax, "percentage", 0) if tax else None
                         ),
-                        "tax_amount": getattr(
-                            invoices[invoice].lines[line].tax, "amount", 0
-                        ),
+                        "tax_amount": getattr(tax, "amount", 0) if tax else None,
                         "tax_exemption_statement": getattr(
-                            invoices[invoice].lines[line].tax,
-                            "exemption_statement",
-                            None,
+                            tax, "exemption_statement", None
                         ),
                     }
                 )
+    else:
+        # An error answer returns the section empty, it does not fail the task
+        module.warn(
+            "Failed to collect the invoices subset, the section is returned "
+            "empty. {0}".format(response_error(res))
+        )
     return invoices_info
+
+
+def get_latest_metric(module, pure_1, name, metric):
+    """Return the latest value of an array metric, None if there is none"""
+    res = pure_1.get_metrics_history(
+        names=[metric],
+        resource_names=[name],
+        aggregation="max",
+        resolution=180000,
+        end_time=int(time.time()) * 1000,
+        start_time=(int(time.time()) * 1000) - 18000000,
+    )
+    if res.status_code != 200:
+        module.warn(
+            "Metric {0} not collected for {1}. {2}".format(
+                metric, name, response_error(res)
+            )
+        )
+        return None
+    series = list(res.items)
+    data = getattr(series[0], "data", None) if series else None
+    if not data:
+        return None
+    point = data[-1]
+    if not point or len(point) < 2:
+        return None
+    return point[1]
 
 
 def generate_appliances_dict(module, pure_1):
     names_info = {"FlashArray": {}, "FlashBlade": {}, "ObjectEngine": {}}
-    appliances = list(pure_1.get_arrays().items)
+    appliances = list(checked(pure_1.get_arrays()).items)
     for appliance in range(0, len(appliances)):
         name = appliances[appliance].name
         try:
@@ -509,7 +604,7 @@ def generate_appliances_dict(module, pure_1):
                 "fqdn": fqdn,
                 "tags": [],
             }
-            res = pure_1.get_array_tags(resource_names=[name])
+            res = pure_1.get_arrays_tags(resource_names=[name])
             if res.status_code == 200:
                 tags = list(res.items)
                 for tag in range(0, len(tags)):
@@ -517,125 +612,39 @@ def generate_appliances_dict(module, pure_1):
                         {
                             "key": tags[tag].key,
                             "value": tags[tag].value,
-                            "org_id": tags[tag].tag_organization_id,
-                            "namespace": tags[tag].namespace,
+                            "org_id": getattr(tags[tag], "tag_organization_id", None),
+                            "namespace": getattr(tags[tag], "namespace", None),
                         }
                     )
-            try:
+            value = get_latest_metric(module, pure_1, name, "array_read_bandwidth")
+            if value is not None:
                 names_info["FlashArray"][name]["bandwidth (read) [MB/s]"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_read_bandwidth"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                    / 104857600,
-                    3,
+                    value / 1048576, 3
                 )
-            except IndexError:
-                pass
-            try:
+            value = get_latest_metric(module, pure_1, name, "array_write_bandwidth")
+            if value is not None:
                 names_info["FlashArray"][name]["bandwidth (write) [MB/s]"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_write_bandwidth"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                    / 104857600,
-                    3,
+                    value / 1048576, 3
                 )
-            except IndexError:
-                pass
-            try:
+            value = get_latest_metric(module, pure_1, name, "array_read_latency_us")
+            if value is not None:
                 names_info["FlashArray"][name]["latency (read) [ms]"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_read_latency_us"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                    / 1000,
-                    2,
+                    value / 1000, 2
                 )
-            except IndexError:
-                pass
-            try:
+            value = get_latest_metric(module, pure_1, name, "array_write_latency_us")
+            if value is not None:
                 names_info["FlashArray"][name]["latency (write) [ms]"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_write_latency_us"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                    / 1000,
-                    2,
+                    value / 1000, 2
                 )
-            except IndexError:
-                pass
-            try:
-                names_info["FlashArray"][name]["iops (read)"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_read_iops"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                )
-            except IndexError:
-                pass
-            try:
-                names_info["FlashArray"][name]["iops (write)"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_write_iops"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                )
-            except IndexError:
-                pass
-            try:
-                names_info["FlashArray"][name]["load [%]"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_total_load"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                    * 100,
-                    3,
-                )
-            except IndexError:
-                pass
+            value = get_latest_metric(module, pure_1, name, "array_read_iops")
+            if value is not None:
+                names_info["FlashArray"][name]["iops (read)"] = round(value)
+            value = get_latest_metric(module, pure_1, name, "array_write_iops")
+            if value is not None:
+                names_info["FlashArray"][name]["iops (write)"] = round(value)
+            value = get_latest_metric(module, pure_1, name, "array_total_load")
+            if value is not None:
+                names_info["FlashArray"][name]["load [%]"] = round(value * 100, 3)
         elif appliances[appliance].os == "Elasticity":
             names_info["ObjectEngine"][name] = {
                 "os_version": appliances[appliance].version,
@@ -643,7 +652,7 @@ def generate_appliances_dict(module, pure_1):
                 "fqdn": fqdn,
                 "tags": [],
             }
-            res = pure_1.get_array_tags(resource_names=[name])
+            res = pure_1.get_arrays_tags(resource_names=[name])
             if res.status_code == 200:
                 tags = list(res.items)
                 for tag in range(0, len(tags)):
@@ -651,8 +660,8 @@ def generate_appliances_dict(module, pure_1):
                         {
                             "key": tags[tag].key,
                             "value": tags[tag].value,
-                            "org_id": tags[tag].tag_organization_id,
-                            "namespace": tags[tag].namespace,
+                            "org_id": getattr(tags[tag], "tag_organization_id", None),
+                            "namespace": getattr(tags[tag], "namespace", None),
                         }
                     )
         elif appliances[appliance].os == "Purity//FB":
@@ -662,7 +671,7 @@ def generate_appliances_dict(module, pure_1):
                 "fqdn": fqdn,
                 "tags": [],
             }
-            res = pure_1.get_array_tags(resource_names=[name])
+            res = pure_1.get_arrays_tags(resource_names=[name])
             if res.status_code == 200:
                 tags = list(res.items)
                 for tag in range(0, len(tags)):
@@ -670,115 +679,66 @@ def generate_appliances_dict(module, pure_1):
                         {
                             "key": tags[tag].key,
                             "value": tags[tag].value,
-                            "org_id": tags[tag].tag_organization_id,
-                            "namespace": tags[tag].namespace,
+                            "org_id": getattr(tags[tag], "tag_organization_id", None),
+                            "namespace": getattr(tags[tag], "namespace", None),
                         }
                     )
-            try:
+            value = get_latest_metric(module, pure_1, name, "array_read_bandwidth")
+            if value is not None:
                 names_info["FlashBlade"][name]["bandwidth (read) [MB/s]"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_read_bandwidth"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                    / 104857600,
-                    3,
+                    value / 1048576, 3
                 )
-            except IndexError:
-                pass
-            try:
+            value = get_latest_metric(module, pure_1, name, "array_write_bandwidth")
+            if value is not None:
                 names_info["FlashBlade"][name]["bandwidth (write) [MB/s]"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_write_bandwidth"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                    / 104857600,
-                    3,
+                    value / 1048576, 3
                 )
-            except IndexError:
-                pass
-            try:
-                names_info["FlashBlade"][name]["iops (read)"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_read_iops"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                )
-            except IndexError:
-                pass
-            try:
-                names_info["FlashBlade"][name]["iops (write)"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_write_iops"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                )
-            except IndexError:
-                pass
-            try:
+            value = get_latest_metric(module, pure_1, name, "array_read_iops")
+            if value is not None:
+                names_info["FlashBlade"][name]["iops (read)"] = round(value)
+            value = get_latest_metric(module, pure_1, name, "array_write_iops")
+            if value is not None:
+                names_info["FlashBlade"][name]["iops (write)"] = round(value)
+            value = get_latest_metric(module, pure_1, name, "array_read_latency_us")
+            if value is not None:
                 names_info["FlashBlade"][name]["latency (read) [ms]"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_read_latency_us"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                    / 1000,
-                    2,
+                    value / 1000, 2
                 )
-            except IndexError:
-                pass
-            try:
+            value = get_latest_metric(module, pure_1, name, "array_write_latency_us")
+            if value is not None:
                 names_info["FlashBlade"][name]["latency (write) [ms]"] = round(
-                    list(
-                        pure_1.get_metrics_history(
-                            names=["array_write_latency_us"],
-                            resource_names=[name],
-                            aggregation="max",
-                            resolution=180000,
-                            end_time=int(time.time()) * 1000,
-                            start_time=(int(time.time()) * 1000) - 18000000,
-                        ).items
-                    )[0].data[-1][1]
-                    / 1000,
-                    2,
+                    value / 1000, 2
                 )
-            except IndexError:
-                pass
         else:
-            module.warning(
+            module.warn(
                 "Unknown operating system detected: {0}.".format(
                     appliances[appliance].os
                 )
             )
     return names_info
+
+
+def collect_subset(module, subset, generate, *args):
+    """Return one section of a subset
+
+    A 403 answer returns the section empty with a warning, any other
+    error answer fails the task with the API message.
+    """
+    try:
+        return generate(*args)
+    except Pure1ResponseError as error:
+        res = error.res
+        if res.status_code == 403:
+            module.warn(
+                "No permission to collect the {0} subset (status code 403). "
+                "The section is returned empty.".format(subset)
+            )
+            return {}
+        module.fail_json(
+            msg="Failed to collect the {0} subset. {1}".format(
+                subset, response_error(res)
+            )
+        )
 
 
 def main():
@@ -810,17 +770,29 @@ def main():
     info = {}
 
     if "minimum" in subset or "all" in subset:
-        info["default"] = generate_default_dict(pure_1)
+        info["default"] = collect_subset(
+            module, "minimum", generate_default_dict, pure_1
+        )
     if "appliances" in subset or "all" in subset:
-        info["appliances"] = generate_appliances_dict(module, pure_1)
+        info["appliances"] = collect_subset(
+            module, "appliances", generate_appliances_dict, module, pure_1
+        )
     if "subscriptions" in subset or "all" in subset:
-        info["subscriptions"] = generate_subscriptions_dict(pure_1)
-        info["subscription_licenses"] = generate_subscription_licenses_dict(pure_1)
+        info["subscriptions"] = collect_subset(
+            module, "subscriptions", generate_subscriptions_dict, pure_1
+        )
+        info["subscription_licenses"] = collect_subset(
+            module, "subscriptions", generate_subscription_licenses_dict, pure_1
+        )
         # info["subscription_assets"] = generate_subscription_assets_dict(pure_1)
     if "contracts" in subset or "all" in subset:
-        info["contracts"] = generate_contract_dict(pure_1)
+        info["contracts"] = collect_subset(
+            module, "contracts", generate_contract_dict, pure_1
+        )
     if "environmental" in subset or "all" in subset:
-        info["environmental"] = generate_esg_dict(module, pure_1)
+        info["environmental"] = collect_subset(
+            module, "environmental", generate_esg_dict, module, pure_1
+        )
     if "invoices" in subset or "all" in subset:
         info["invoices"] = generate_invoices_dict(module, pure_1)
 
