@@ -1,0 +1,2 @@
+trivial:
+  - tests - check every Pure1 client call in the plugins against the method signatures of the installed py-pure-client.

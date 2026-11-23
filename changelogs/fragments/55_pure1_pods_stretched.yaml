@@ -1,0 +1,2 @@
+bugfixes:
+  - pure1_pods - A stretched pod is now listed under each of its arrays, or only under the requested array when ``array`` is set.
