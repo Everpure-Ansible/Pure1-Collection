@@ -34,6 +34,13 @@ options:
   tag:
     description:
     - List of key value pairs to assign to the array.
+    - Each tag is a text of the form C(key:value). Write it in quotes and with
+      no space after the colon, as C('key:value').
+    - "A tag that YAML reads as a mapping, which is C(key: value) with a space
+      after the colon, or as a list fails the task. A number or a boolean is
+      taken as the text Ansible makes of it."
+    - An empty entry (null) fails the task with ansible-core up to 2.18. From
+      ansible-core 2.19 it is taken as an empty text.
     - Separate the key from the value using a colon (:) only.
     - Only the first colon separates the two, so a value can contain colons.
     - With I(state=present) every entry needs a key and a value. If a key is
@@ -47,7 +54,7 @@ options:
     - An empty list changes nothing.
     - See examples for exact formatting requirements
     type: list
-    elements: str
+    elements: raw
     required: true
   state:
     description:
@@ -63,6 +70,8 @@ extends_documentation_fragment:
 """
 
 EXAMPLES = r"""
+# Write each tag in quotes and with no space after its colon. Without the
+# quotes and with a space, key1: value1 is a YAML mapping and the task fails.
 - name: Create new tags for array foo
   everpure.pure1.pure1_array_tags:
     name: foo
@@ -101,6 +110,7 @@ RETURN = r"""
 import inspect
 
 from ansible.module_utils.basic import AnsibleModule
+from ansible.module_utils.common.arg_spec import ArgumentSpecValidator
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     Pure1RequestError,
     filter_string,
@@ -109,6 +119,62 @@ from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     pure1_items,
     pure1_response,
 )
+
+# What ansible-core makes of a list of tags whose elements are declared str
+TAG_TEXTS = dict(tag=dict(type="list", elements="str"))
+
+
+def _mapping_hint(tag):
+    """Return how to write a tag that the task gives as a mapping
+
+    The tag itself is shown where the mapping holds one key and one value
+    that are texts and can stand between quotes as they are, with no white
+    space at either end, and where the tag written that way is read as that
+    key and that value: the first colon splits a tag, so the key holds none.
+    """
+    if len(tag) == 1:
+        key, value = list(tag.items())[0]
+        texts = all(
+            isinstance(part, str)
+            and part
+            and part == part.strip()
+            and "'" not in part
+            and "\n" not in part
+            for part in (key, value)
+        )
+        if texts and ":" not in key:
+            return "Write the tag as '{0}:{1}'".format(key, value)
+    return "Write each tag as 'key:value'"
+
+
+def _tags_to_texts(module):
+    """Make the tags of the task texts, or fail
+
+    The elements of tag are declared raw, so that a tag YAML reads as a
+    mapping (key: value, with a space after the colon) or as a list arrives
+    as what it is and fails the task. Declared str it arrives as the text of
+    a Python dictionary or list, which the first colon splits into a key such
+    as {'key' and a value. Every other entry goes through ansible-core as an
+    element declared str does: it becomes the same text, or fails the task
+    with the same message.
+    """
+    tags = module.params["tag"]
+    for tag in tags:
+        if isinstance(tag, dict):
+            module.fail_json(
+                msg="Tag {0} is a mapping, not a text. {1}, in quotes and with "
+                "no space after the colon.".format(tag, _mapping_hint(tag))
+            )
+        if isinstance(tag, list):
+            module.fail_json(
+                msg="Tag {0} is a list, not a text. Write each of its entries "
+                "as an entry of tag itself.".format(tag)
+            )
+    texts = ArgumentSpecValidator(TAG_TEXTS).validate(dict(tag=tags))
+    # As AnsibleModule does it: the params get what was made, then it fails
+    module.params["tag"] = texts.validated_parameters["tag"]
+    if texts.error_messages:
+        module.fail_json(msg=texts.error_messages[0])
 
 
 def _add_tag(tags, key, value):
@@ -296,12 +362,14 @@ def main():
         dict(
             name=dict(type="str", required=True),
             state=dict(type="str", default="present", choices=["absent", "present"]),
-            tag=dict(type="list", elements="str", required=True),
+            tag=dict(type="list", elements="raw", required=True),
         )
     )
 
     module = AnsibleModule(argument_spec, supports_check_mode=True)
 
+    # A tag that is no text fails the task before Pure1 is asked anything
+    _tags_to_texts(module)
     state = module.params["state"]
     if state == "present":
         # A tag that cannot be set fails the task before Pure1 is asked anything
