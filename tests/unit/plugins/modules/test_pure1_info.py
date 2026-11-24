@@ -1533,8 +1533,17 @@ class TestMain:
 
     def _client(self, client):
         arrays = [_array("fa1", "Purity//FA"), _array("fb1", "Purity//FB")]
-        # get_pure1 makes the first call, each subset that lists arrays one more
-        client.get_arrays.side_effect = lambda: valid_response(arrays)
+
+        def get_arrays(**kwargs):
+            # get_pure1 makes the first call, for the count alone
+            if kwargs == {"limit": 0}:
+                return valid_response(total_item_count=len(arrays))
+            # each subset that lists arrays makes one more, without arguments
+            if kwargs:
+                raise TypeError("get_arrays() was called with {0}".format(kwargs))
+            return valid_response(arrays)
+
+        client.get_arrays.side_effect = get_arrays
         for method in (
             "get_volumes",
             "get_volume_snapshots",
@@ -1600,9 +1609,9 @@ class TestMain:
     def _answer_with(self, client, method, answer):
         """Give one listing call an error answer on every call main() makes.
 
-        get_pure1 checks the new client with get_arrays() and fails the task
-        itself on an error answer, so that call keeps a valid one. The one
-        subset the test asks for then makes the second call.
+        get_pure1 checks the new client with get_arrays(limit=0) and fails the
+        task itself on an error answer, so that call keeps a valid one. The
+        one subset the test asks for then makes the second call.
         """
         if method == "get_arrays":
             client.get_arrays.side_effect = [valid_response(), answer]
@@ -1716,7 +1725,7 @@ class TestMain:
         )
         module.exit_json.assert_not_called()
         # nothing was collected: the one call is the check of get_pure1
-        pure1_client.get_arrays.assert_called_once_with()
+        pure1_client.get_arrays.assert_called_once_with(limit=0)
         pure1_client.get_volumes.assert_not_called()
 
     def test_other_error_fails_the_task(self, pure1_client):

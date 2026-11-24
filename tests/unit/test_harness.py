@@ -8,6 +8,7 @@ from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 
 import calendar
+import os
 import time
 import types
 from unittest.mock import patch
@@ -24,6 +25,24 @@ from tests.unit.conftest import (
     sdk_model,
     valid_response,
 )
+
+# The variables get_pure1 and py-pure-client read credentials from
+PURE1_VARIABLES = [
+    "PURE1_APP_ID",
+    "PURE1_PRIVATE_KEY_FILE",
+    "PURE1_PRIVATE_KEY_PASSWORD",
+    "PURE1_PRIVATE_PASSWORD",
+    "PURE1_ID_TOKEN",
+]
+
+
+@pytest.fixture(scope="class")
+def exported_pure1_variables():
+    """Export the Pure1 variables, as the shell that starts pytest may have them."""
+    with pytest.MonkeyPatch.context() as shell:
+        for name in PURE1_VARIABLES:
+            shell.setenv(name, "from-the-shell")
+        yield
 
 
 def _plugin(**options):
@@ -118,7 +137,7 @@ class TestStandIns:
 
 
 class TestFixtures:
-    """What a fixture of the harness changes for the test that asks for it."""
+    """What the fixtures of the harness change for a test."""
 
     @pytest.mark.usefixtures("localtime_ahead_of_utc")
     def test_localtime_runs_ahead_of_utc(self):
@@ -127,6 +146,11 @@ class TestFixtures:
         # without an argument it is the time now, as for the real localtime
         ahead = calendar.timegm(time.localtime()) - time.time()
         assert 13 * 3600 - 2 < ahead < 13 * 3600 + 2
+
+    @pytest.mark.usefixtures("exported_pure1_variables")
+    def test_pure1_variables_of_the_shell_are_not_in_a_test(self):
+        """get_pure1 would read a credential the test leaves empty from them."""
+        assert [name for name in PURE1_VARIABLES if name in os.environ] == []
 
 
 class TestRunMain:
@@ -148,6 +172,17 @@ class TestRunMain:
         module = run_main(_plugin(), name="foo")
 
         assert module.params["array"] == "from-the-environment"
+
+    def test_no_log_values_come_from_the_argument_spec(self, monkeypatch):
+        """What AnsibleModule hides in a result: also what a fallback read."""
+        monkeypatch.delitem(CREDENTIALS, "app_id")
+        monkeypatch.setenv("PURE1_APP_ID", "env-app-id")
+
+        module = run_main(_plugin(), name="foo", password="keypass")
+
+        assert module.no_log_values == {"env-app-id", "keypass"}
+        # without the argument spec no param is known to be secret
+        assert ansible_module(password="keypass").no_log_values == set()
 
     @pytest.mark.parametrize(
         "params, text",

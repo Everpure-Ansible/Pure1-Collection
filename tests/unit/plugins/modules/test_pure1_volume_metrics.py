@@ -698,7 +698,7 @@ class TestMain:
         module = run_main(pure1_volume_metrics, metrics=["volume_physical_capacity"])
 
         # the one call that lists arrays is the check of get_pure1
-        client.get_arrays.assert_called_once_with()
+        client.get_arrays.assert_called_once_with(limit=0)
         client.get_volumes.assert_called_once_with()
         module.exit_json.assert_called_once_with(
             changed=False,

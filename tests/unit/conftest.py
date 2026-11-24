@@ -72,6 +72,8 @@ CREDENTIALS = {
     "app_id": "pure1-app-id",
     "key_file": "/run/secrets/pure1.pem",
     "password": None,
+    # not a credential: the default of the other option every module takes
+    "validate_certs": True,
 }
 # The rules main() can give AnsibleModule beside the argument spec
 _SPEC_RULES = (
@@ -148,6 +150,8 @@ def ansible_module(check_mode=False, **params):
     module = _StandIn(AnsibleModule)
     module.params = dict(CREDENTIALS, **params)
     module.check_mode = check_mode
+    # the values AnsibleModule hides in what the task returns
+    module.no_log_values = set()
     module.exit_json.side_effect = SystemExit(0)
     module.fail_json.side_effect = SystemExit(1)
     return module
@@ -157,10 +161,11 @@ def run_main(plugin, check_mode=False, **params):
     """Run main() of a module up to its exit_json or fail_json.
 
     The params go through the argument spec main() declares, as AnsibleModule
-    does it: defaults and fallbacks are filled in, a missing, unknown or
-    refused parameter ends in fail_json, and check mode that main() does not
-    declare ends in a skipped exit_json. Returns the AnsibleModule stand-in
-    that main() was given.
+    does it: defaults and fallbacks are filled in, the values of the no_log
+    params are collected in no_log_values, a missing, unknown or refused
+    parameter ends in fail_json, and check mode that main() does not declare
+    ends in a skipped exit_json. Returns the AnsibleModule stand-in that
+    main() was given.
     """
     module = ansible_module(check_mode=check_mode, **params)
 
@@ -168,6 +173,13 @@ def run_main(plugin, check_mode=False, **params):
         rules = {name: options.get(name) for name in _SPEC_RULES}
         result = ArgumentSpecValidator(argument_spec, **rules).validate(module.params)
         module.params = result.validated_parameters
+        # AnsibleModule collects the same for a no_log param that holds a
+        # string; the validation result has no public attribute for them
+        module.no_log_values.update(
+            value
+            for name, value in module.params.items()
+            if value and argument_spec.get(name, {}).get("no_log")
+        )
         if result.error_messages:
             message = result.error_messages[0]
             if isinstance(result.errors[0], UnsupportedError):
@@ -263,6 +275,24 @@ def error_response(status_code, message=None, context=None):
     return ErrorResponse(status_code, [ApiError(context, message)], {})
 
 
+@pytest.fixture(autouse=True)
+def _no_pure1_environment(monkeypatch):
+    """Take the Pure1 variables of the shell that started pytest out of the test.
+
+    get_pure1 reads a credential the task gives empty from them, and
+    py-pure-client reads PURE1_ID_TOKEN. A test that needs one sets it with
+    monkeypatch.setenv.
+    """
+    for name in (
+        "PURE1_APP_ID",
+        "PURE1_PRIVATE_KEY_FILE",
+        "PURE1_PRIVATE_KEY_PASSWORD",
+        "PURE1_PRIVATE_PASSWORD",
+        "PURE1_ID_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _no_client(*args, **kwargs):
     pytest.fail("pure1.Client() was called: ask for the pure1_client fixture")
 
@@ -283,7 +313,7 @@ def pure1_client(client_factory):
     """Return the stand-in for the SDK client; pure1.Client() gives it in this test."""
     client = _StandIn(NEWEST.Client)
     client._api_client = _StandIn(NEWEST.client.ApiClient)
-    # get_pure1 checks every new client with get_arrays()
+    # get_pure1 checks every new client with get_arrays(limit=0)
     client.get_arrays.return_value = valid_response()
     client_factory.side_effect = None
     client_factory.return_value = client
