@@ -7,14 +7,17 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
+import importlib.metadata
 import importlib.util
 import os
 import ssl
 import stat
+import time
 import types
 import pytest
 from unittest.mock import patch
 
+import pypureclient
 import urllib3
 from ansible.module_utils.basic import AnsibleModule, env_fallback
 from pypureclient import ApiError, ErrorResponse, PureError, ValidResponse
@@ -27,13 +30,23 @@ from pypureclient.token_manager import TokenManager
 
 from plugins.module_utils import pure1 as pure1_utils
 from plugins.module_utils.pure1 import (
+    REQUEST_TOO_LONG,
+    Pure1Listing,
     Pure1RequestError,
+    filter_and,
+    filter_in,
+    filter_raw,
     filter_string,
     get_pure1,
     pure1_argument_spec,
+    pure1_attr,
     pure1_error_text,
     pure1_items,
+    pure1_list,
+    pure1_require,
+    pure1_resolve_arrays,
     pure1_response,
+    pure1_time,
 )
 from tests.unit.conftest import (
     CREDENTIALS,
@@ -41,6 +54,7 @@ from tests.unit.conftest import (
     SDK,
     ansible_module,
     error_response,
+    paged_answers,
     run_main,
     sdk_model,
     valid_response,
@@ -1596,3 +1610,1725 @@ class TestFilterString:
 
     def test_filter_is_built_from_it(self):
         assert "arrays.name=" + filter_string("o'brien") == "arrays.name='o\\'brien'"
+
+
+TOO_LONG = "The request is too long for Pure1: give fewer names in one task."
+# The helpers that run a request; each takes a request function
+REQUEST_HELPERS = [
+    pytest.param(pure1_items, id="pure1_items"),
+    pytest.param(pure1_response, id="pure1_response"),
+    pytest.param(pure1_list, id="pure1_list"),
+]
+
+
+def _hardware(count):
+    """Return that many hardware items, as get_hardware lists them."""
+    return [
+        sdk_model("Hardware", name="hw-{0}".format(number)) for number in range(count)
+    ]
+
+
+def _serve(pure1_client, count=8, **options):
+    """Make get_hardware list that many items, three a page; return items and answers."""
+    items = _hardware(count)
+    answers = paged_answers("HardwareGetResponse", items, page_size=3, **options)
+    pure1_client.get_hardware.side_effect = answers
+    return items, answers
+
+
+def _paging(answers):
+    """Return limit, offset and continuation token of every request, in order."""
+    return [
+        (request.get("limit"), request.get("offset"), request.get("continuation_token"))
+        for request in answers.requests
+    ]
+
+
+def _list_failure(module, request, **options):
+    """Run pure1_list and return the message it failed with."""
+    with pytest.raises(SystemExit):
+        pure1_list(module, "get_hardware", request, **options)
+    module.fail_json.assert_called_once()
+    return module.fail_json.call_args[1]["msg"]
+
+
+def _gateway_refusal():
+    """Return the SDK's answer to a request that is too long, up to 8192 bytes.
+
+    Pure1 answers HTTP 400 with an HTML page, and py-pure-client makes an
+    error answer with one message of its own of a body that is no JSON.
+    """
+    error = ApiException(status=400, reason="Bad Request")
+    error.body = (
+        '<!doctype html><html lang="en"><head><title>HTTP Status 400 '
+        "– Bad Request</title></head><body></body></html>"
+    )
+    error.headers = {"Content-Type": "text/html;charset=utf-8"}
+    return NEWEST.Client._create_error_response(None, error)
+
+
+def _refusal_of_pure1(body):
+    """Return the SDK's answer to a request Pure1 refuses with a JSON body."""
+    error = ApiException(status=400, reason="Bad Request")
+    error.body = body
+    error.headers = {"Content-Type": "application/json"}
+    return NEWEST.Client._create_error_response(None, error)
+
+
+def _uri_too_long():
+    """Return what py-pure-client raises for a request line above 8192 bytes.
+
+    Pure1 answers HTTP 414, a status py-pure-client has no error answer for.
+    """
+    error = ApiException(status=414, reason="Request-URI Too Large")
+    error.body = "Request-URI Too Large"
+    error.headers = {"Content-Type": "text/plain; charset=UTF-8"}
+    return PureError(error)
+
+
+# The page Pure1 answers a request that is too long with, up to 8192 bytes
+GATEWAY_PAGE = (
+    '<!doctype html><html lang="en"><head><title>HTTP Status 400 '
+    "– Bad Request</title></head><body></body></html>"
+)
+# What Pure1 answers a request that it refuses for what it asks
+ILLEGAL_FILTER = '{"errors":[{"message":"Illegal filter format","context":"x"}]}'
+
+
+def _refused_later_page(body=GATEWAY_PAGE):
+    """Return the HTTP 400 with this body as the transport raises it.
+
+    py-pure-client makes an error answer of it for the first request only.
+    From the request for a later page it comes out of the iteration, with
+    its headers and its body in the text of a PureError.
+    """
+    error = ApiException(status=400, reason="Bad Request")
+    error.body = body
+    error.headers = {"Content-Type": "text/html;charset=utf-8"}
+    return error
+
+
+def _answer_with_a_refused_later_page(body=GATEWAY_PAGE):
+    """Return a valid answer whose next page Pure1 refuses with HTTP 400."""
+
+    def next_page(**kwargs):
+        raise _refused_later_page(body)
+
+    return _paged_response([sdk_model("Pod", name="pod-a")], next_page)
+
+
+def _array(name, **fields):
+    return sdk_model("Array", name=name, **fields)
+
+
+class TestPure1List:
+    """pure1_list reads a listing page by page: tokens by the SDK, offsets itself."""
+
+    def test_unsorted_listing_is_read_through_its_tokens(self, pure1_client):
+        """The module makes one call, the SDK fetches the pages of the tokens."""
+        items, answers = _serve(pure1_client)
+        module = ansible_module()
+
+        listing = pure1_list(
+            module,
+            "get_hardware",
+            lambda **page: pure1_client.get_hardware(filter="type='fan'", **page),
+        )
+
+        assert listing == Pure1Listing(items=items, total=8, truncated=False)
+        assert isinstance(listing.items, list)
+        assert answers.requests == [
+            {"filter": "type='fan'"},
+            {"filter": "type='fan'", "continuation_token": "page-3"},
+            {"filter": "type='fan'", "continuation_token": "page-6"},
+        ]
+        pure1_client.get_hardware.assert_called_once_with(filter="type='fan'")
+        module.fail_json.assert_not_called()
+
+    def test_sorted_listing_is_read_by_offset(self, pure1_client):
+        """Pure1 gives no token with a sort, and the SDK stops after one page."""
+        items, answers = _serve(pure1_client)
+
+        def request(**page):
+            return pure1_client.get_hardware(sort=["name", "id"], **page)
+
+        assert pure1_items(ansible_module(), "get_hardware", request) == items[:3]
+        del answers.requests[:]
+
+        listing = pure1_list(ansible_module(), "get_hardware", request)
+
+        assert listing == Pure1Listing(items, 8, False)
+        assert answers.requests == [
+            {"sort": ["name", "id"]},
+            {"sort": ["name", "id"], "offset": 3},
+            {"sort": ["name", "id"], "offset": 6},
+        ]
+
+    @pytest.mark.parametrize(
+        "limit, paging",
+        [
+            pytest.param(1, [(1, None, None)], id="one"),
+            pytest.param(2, [(2, None, None)], id="below a page"),
+            pytest.param(3, [(3, None, None)], id="a page"),
+            pytest.param(4, [(4, None, None), (4, None, "page-3")], id="above a page"),
+            pytest.param(6, [(6, None, None), (6, None, "page-3")], id="two pages"),
+            pytest.param(
+                7,
+                [(7, None, None), (7, None, "page-3"), (7, None, "page-6")],
+                id="into the last page",
+            ),
+            pytest.param(
+                8,
+                [(8, None, None), (8, None, "page-3"), (8, None, "page-6")],
+                id="all",
+            ),
+            pytest.param(
+                20,
+                [(20, None, None), (20, None, "page-3"), (20, None, "page-6")],
+                id="above all",
+            ),
+        ],
+    )
+    def test_limit_on_an_unsorted_listing(self, pure1_client, limit, paging):
+        """At most limit items, and no page that they do not need."""
+        items, answers = _serve(pure1_client)
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_hardware",
+            lambda **page: pure1_client.get_hardware(filter="type='fan'", **page),
+            limit=limit,
+        )
+
+        assert listing == Pure1Listing(items[:limit], 8, limit < 8)
+        assert _paging(answers) == paging
+
+    @pytest.mark.parametrize(
+        "limit, paging",
+        [
+            pytest.param(1, [(1, None, None)], id="one"),
+            pytest.param(2, [(2, None, None)], id="below a page"),
+            pytest.param(3, [(3, None, None)], id="a page"),
+            pytest.param(4, [(4, None, None), (1, 3, None)], id="above a page"),
+            pytest.param(6, [(6, None, None), (3, 3, None)], id="two pages"),
+            pytest.param(
+                7,
+                [(7, None, None), (4, 3, None), (1, 6, None)],
+                id="into the last page",
+            ),
+            pytest.param(8, [(8, None, None), (5, 3, None), (2, 6, None)], id="all"),
+            pytest.param(
+                20, [(20, None, None), (17, 3, None), (14, 6, None)], id="above all"
+            ),
+        ],
+    )
+    def test_limit_on_a_sorted_listing(self, pure1_client, limit, paging):
+        """Each page is asked for with what is still wanted, from where it starts."""
+        items, answers = _serve(pure1_client)
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_hardware",
+            lambda **page: pure1_client.get_hardware(sort=["name", "id"], **page),
+            limit=limit,
+        )
+
+        assert listing == Pure1Listing(items[:limit], 8, limit < 8)
+        assert _paging(answers) == paging
+
+    def test_limit_0_gives_the_total_alone(self, pure1_client):
+        dummy, answers = _serve(pure1_client)
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_hardware",
+            lambda **page: pure1_client.get_hardware(filter="type='fan'", **page),
+            limit=0,
+        )
+
+        assert listing == Pure1Listing([], 8, True)
+        assert answers.requests == [{"filter": "type='fan'", "limit": 0}]
+
+    def test_limit_0_reads_no_item_that_pure1_sends_all_the_same(self, pure1_client):
+        """get_arrays_tags ignores the limit and sends every tag."""
+        tags = [sdk_model("Tag", key="site"), sdk_model("Tag", key="rack")]
+        pure1_client.get_arrays_tags.return_value = valid_response(tags)
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_arrays_tags",
+            lambda **page: pure1_client.get_arrays_tags(namespaces=["pure1"], **page),
+            limit=0,
+        )
+
+        assert listing == Pure1Listing([], 2, True)
+        pure1_client.get_arrays_tags.assert_called_once_with(
+            namespaces=["pure1"], limit=0
+        )
+
+    def test_limit_0_asks_for_one_item_where_pure1_counts_nothing(self, pure1_client):
+        """get_protection_group_snapshots counts 0 when no item is asked for."""
+        snapshots = [
+            sdk_model("ProtectionGroupSnapshot", name="pg.{0}".format(number))
+            for number in range(5)
+        ]
+        response = "ProtectionGroupSnapshotGetResponse"
+        counted = paged_answers(response, snapshots, page_size=3)
+        uncounted = paged_answers(response, snapshots, 3, total_item_count=0)
+
+        def answer(**kwargs):
+            return (uncounted if kwargs["limit"] == 0 else counted)(**kwargs)
+
+        pure1_client.get_protection_group_snapshots.side_effect = answer
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_protection_group_snapshots",
+            lambda **page: pure1_client.get_protection_group_snapshots(
+                sort=["created-", "id"], **page
+            ),
+            limit=0,
+        )
+
+        assert listing == Pure1Listing([], 5, True)
+        assert uncounted.requests == [{"sort": ["created-", "id"], "limit": 0}]
+        assert counted.requests == [{"sort": ["created-", "id"], "limit": 1}]
+
+    def test_limit_0_asks_again_where_nothing_matches(self, pure1_client):
+        """A total of 0 is believed when one item is asked for and none comes."""
+        dummy, answers = _serve(pure1_client, count=0)
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_hardware",
+            lambda **page: pure1_client.get_hardware(filter="type='fan'", **page),
+            limit=0,
+        )
+
+        assert listing == Pure1Listing([], 0, False)
+        assert answers.requests == [
+            {"filter": "type='fan'", "limit": 0},
+            {"filter": "type='fan'", "limit": 1},
+        ]
+
+    def test_limit_0_with_an_item_that_pure1_did_not_count(self, pure1_client):
+        """The item is not returned, and how many there are is not known."""
+        items = _hardware(2)
+        uncounted = paged_answers("HardwareGetResponse", items, total_item_count=0)
+        without = paged_answers("HardwareGetResponse", items, total_item_count=None)
+
+        def answer(**kwargs):
+            return (uncounted if kwargs["limit"] == 0 else without)(**kwargs)
+
+        pure1_client.get_hardware.side_effect = answer
+
+        def request(**page):
+            return pure1_client.get_hardware(**page)
+
+        listing = pure1_list(ansible_module(), "get_hardware", request, limit=0)
+
+        assert listing == Pure1Listing([], None, True)
+        assert without.requests == [{"limit": 1}]
+
+    def test_error_while_pure1_is_asked_for_one_item_fails_the_task(self, pure1_client):
+        pure1_client.get_hardware.side_effect = [
+            valid_response(),
+            error_response(503, "Service unavailable"),
+        ]
+
+        def request(**page):
+            return pure1_client.get_hardware(**page)
+
+        msg = _list_failure(ansible_module(), request, limit=0)
+
+        assert (
+            msg == "Pure1 request get_hardware failed (HTTP 503): Service unavailable"
+        )
+
+    @pytest.mark.parametrize(
+        "limit, calls",
+        [
+            pytest.param(None, 1, id="None"),
+            pytest.param(0, 2, id="0"),
+            pytest.param(5, 1, id="5"),
+        ],
+    )
+    def test_listing_without_items(self, pure1_client, limit, calls):
+        pure1_client.get_hardware.side_effect = lambda **kwargs: valid_response()
+
+        def request(**page):
+            return pure1_client.get_hardware(**page)
+
+        listing = pure1_list(ansible_module(), "get_hardware", request, limit=limit)
+
+        assert listing == Pure1Listing([], 0, False)
+        assert pure1_client.get_hardware.call_count == calls
+
+    @pytest.mark.parametrize("limit", [None, 5])
+    def test_request_that_takes_no_paging_keyword_is_refused(self, pure1_client, limit):
+        """It would work until a listing needs a second page."""
+        _serve(pure1_client)
+        module = ansible_module()
+
+        with pytest.raises(TypeError) as refused:
+            pure1_list(
+                module,
+                "get_hardware",
+                lambda: pure1_client.get_hardware(sort=["name"]),
+                limit=limit,
+            )
+
+        assert str(refused.value) == (
+            "the request function of pure1_list() must take the paging "
+            "keywords (**page) and hand them on"
+        )
+        pure1_client.get_hardware.assert_not_called()
+        module.fail_json.assert_not_called()
+
+    def test_request_that_takes_no_offset_is_refused(self, pure1_client):
+        """A sorted listing would end after its first page."""
+        _serve(pure1_client)
+
+        def request(limit=None):
+            return pure1_client.get_hardware(sort=["name"], limit=limit)
+
+        with pytest.raises(TypeError, match="must take the paging keywords"):
+            pure1_list(ansible_module(), "get_hardware", request)
+
+        pure1_client.get_hardware.assert_not_called()
+
+    def test_request_that_names_the_paging_keywords_is_accepted(self, pure1_client):
+        items, answers = _serve(pure1_client)
+
+        def request(limit=None, offset=None):
+            return pure1_client.get_hardware(
+                sort=["name", "id"], limit=limit, offset=offset
+            )
+
+        listing = pure1_list(ansible_module(), "get_hardware", request)
+
+        assert listing == Pure1Listing(items, 8, False)
+        assert _paging(answers) == [
+            (None, None, None),
+            (None, 3, None),
+            (None, 6, None),
+        ]
+
+    def test_request_without_a_signature_is_called(self, pure1_client, monkeypatch):
+        """Some callables have none to look at."""
+        items, dummy = _serve(pure1_client, count=2)
+
+        def no_signature(function):
+            raise ValueError("no signature found for {0}".format(function))
+
+        def request(**page):
+            return pure1_client.get_hardware(**page)
+
+        monkeypatch.setattr(
+            pure1_utils, "inspect", types.SimpleNamespace(signature=no_signature)
+        )
+
+        listing = pure1_list(ansible_module(), "get_hardware", request)
+
+        assert listing == Pure1Listing(items, 2, False)
+
+    def test_answer_without_a_body_is_a_listing_without_items(self):
+        """It has no items and no total, and is asked for once."""
+        answers = iter([ValidResponse(200, None, None, None, {})])
+
+        listing = pure1_list(
+            ansible_module(), "get_hardware", lambda **page: next(answers)
+        )
+
+        assert listing == Pure1Listing([], None, False)
+
+    def test_result_unpacks_into_items_total_and_truncated(self, pure1_client):
+        items, dummy = _serve(pure1_client, count=2)
+
+        def request(**page):
+            return pure1_client.get_hardware(**page)
+
+        found, total, truncated = pure1_list(ansible_module(), "get_hardware", request)
+
+        assert (found, total, truncated) == (items, 2, False)
+
+    @pytest.mark.parametrize(
+        "sort, paging",
+        [
+            pytest.param(
+                None,
+                [
+                    (None, None, None),
+                    (None, None, "page-3"),
+                    (None, None, "page-6"),
+                    (None, 8, None),
+                ],
+                id="unsorted",
+            ),
+            pytest.param(
+                ["name", "id"],
+                [(None, None, None), (None, 3, None), (None, 6, None), (None, 8, None)],
+                id="sorted",
+            ),
+        ],
+    )
+    def test_listing_without_a_total_is_read_until_a_page_is_empty(
+        self, pure1_client, sort, paging
+    ):
+        """Without a total only an empty page tells that nothing is left."""
+        items, answers = _serve(pure1_client, total_item_count=None)
+
+        def request(**page):
+            if sort:
+                page["sort"] = sort
+            return pure1_client.get_hardware(**page)
+
+        listing = pure1_list(ansible_module(), "get_hardware", request)
+
+        assert listing == Pure1Listing(items, None, False)
+        assert _paging(answers) == paging
+
+    @pytest.mark.parametrize(
+        "limit, paging, truncated",
+        [
+            pytest.param(3, [(3, None, None)], True, id="limit reached"),
+            pytest.param(
+                8,
+                [(8, None, None), (5, 3, None), (2, 6, None)],
+                True,
+                id="limit reached with the last item",
+            ),
+            pytest.param(
+                20,
+                [(20, None, None), (17, 3, None), (14, 6, None), (12, 8, None)],
+                False,
+                id="limit above all",
+            ),
+            pytest.param(0, [(0, None, None)], True, id="limit 0"),
+        ],
+    )
+    def test_limit_without_a_total(self, pure1_client, limit, paging, truncated):
+        """A limit that was reached may have cut the listing: nothing tells."""
+        items, answers = _serve(pure1_client, total_item_count=None)
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_hardware",
+            lambda **page: pure1_client.get_hardware(sort=["name", "id"], **page),
+            limit=limit,
+        )
+
+        assert listing == Pure1Listing(items[:limit], None, truncated)
+        assert _paging(answers) == paging
+
+    @pytest.mark.parametrize(
+        "options, total",
+        [
+            pytest.param({}, 5, id="total"),
+            pytest.param({"total_item_count": None}, None, id="no total"),
+        ],
+    )
+    def test_sorted_listing_of_a_method_without_offset_ends_truncated(
+        self, pure1_client, options, total
+    ):
+        """The four get_recommendations methods take no offset."""
+        recommendations = [
+            sdk_model("Recommendation", id="r-{0}".format(number))
+            for number in range(5)
+        ]
+        answers = paged_answers(
+            "RecommendationGetResponse", recommendations, page_size=3, **options
+        )
+        pure1_client.get_recommendations.side_effect = answers
+        module = ansible_module()
+
+        listing = pure1_list(
+            module,
+            "get_recommendations",
+            lambda **page: pure1_client.get_recommendations(sort=["id"], **page),
+        )
+
+        assert listing == Pure1Listing(recommendations[:3], total, True)
+        assert answers.requests == [{"sort": ["id"]}]
+        module.fail_json.assert_not_called()
+
+    def test_unsorted_listing_of_a_method_without_offset_is_complete(
+        self, pure1_client
+    ):
+        recommendations = [
+            sdk_model("Recommendation", id="r-{0}".format(number))
+            for number in range(5)
+        ]
+        answers = paged_answers("RecommendationGetResponse", recommendations, 3)
+        pure1_client.get_recommendations.side_effect = answers
+
+        def request(**page):
+            return pure1_client.get_recommendations(**page)
+
+        listing = pure1_list(ansible_module(), "get_recommendations", request)
+
+        assert listing == Pure1Listing(recommendations, 5, False)
+        assert _paging(answers) == [(None, None, None), (None, None, "page-3")]
+
+    def test_another_type_error_for_a_later_page_fails_the_task(self, pure1_client):
+        """Only a call that does not take offset ends the listing."""
+        _serve(pure1_client)
+
+        def request(**page):
+            if "offset" in page:
+                raise TypeError("'NoneType' object is not iterable")
+            return pure1_client.get_hardware(sort=["name"], **page)
+
+        msg = _list_failure(ansible_module(), request)
+
+        assert msg == (
+            "Pure1 request get_hardware failed: "
+            "TypeError: 'NoneType' object is not iterable"
+        )
+
+    @pytest.mark.parametrize(
+        "error, expected",
+        [
+            pytest.param(
+                TypeError("'offset' must be an integer"),
+                "TypeError: 'offset' must be an integer",
+                id="another TypeError about offset",
+            ),
+            pytest.param(
+                PureError("got an unexpected keyword argument 'offset'"),
+                "PureError: got an unexpected keyword argument 'offset'",
+                id="another exception with the words",
+            ),
+        ],
+    )
+    def test_another_error_that_names_offset_fails_the_task(
+        self, pure1_client, error, expected
+    ):
+        """Only the TypeError of a call that does not take offset ends the listing."""
+        _serve(pure1_client)
+
+        def request(**page):
+            if "offset" in page:
+                raise error
+            return pure1_client.get_hardware(sort=["name"], **page)
+
+        msg = _list_failure(ansible_module(), request)
+
+        assert msg == "Pure1 request get_hardware failed: " + expected
+
+    def test_later_page_that_starts_as_the_listing_does_is_read(self, pure1_client):
+        """Only a whole page that comes again tells that Pure1 ignored the offset."""
+        items = _hardware(8)
+        items[3] = sdk_model("Hardware", name="hw-0")
+        assert items[3] == items[0]
+        answers = paged_answers("HardwareGetResponse", items, page_size=3)
+        pure1_client.get_hardware.side_effect = answers
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_hardware",
+            lambda **page: pure1_client.get_hardware(sort=["name"], **page),
+        )
+
+        assert listing == Pure1Listing(items, 8, False)
+        assert _paging(answers) == [
+            (None, None, None),
+            (None, 3, None),
+            (None, 6, None),
+        ]
+
+    def test_listing_that_ignores_the_offset_ends_truncated(self, pure1_client):
+        """Pure1 gives the first page again: its items are not added twice."""
+        tags = [sdk_model("Tag", key="key-{0}".format(number)) for number in range(5)]
+        pure1_client.get_arrays_tags.side_effect = lambda **kwargs: valid_response(
+            tags[:3], total_item_count=5
+        )
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_arrays_tags",
+            lambda **page: pure1_client.get_arrays_tags(namespaces=["pure1"], **page),
+        )
+
+        assert listing == Pure1Listing(tags[:3], 5, True)
+        assert pure1_client.get_arrays_tags.call_count == 2
+        pure1_client.get_arrays_tags.assert_called_with(namespaces=["pure1"], offset=3)
+
+    def test_fewer_items_than_pure1_reported_is_truncated(self, pure1_client):
+        """The helper asks once for what is missing and gets nothing."""
+        items, answers = _serve(pure1_client, count=5, total_item_count=7)
+
+        def request(**page):
+            return pure1_client.get_hardware(**page)
+
+        listing = pure1_list(ansible_module(), "get_hardware", request)
+
+        assert listing == Pure1Listing(items, 7, True)
+        assert _paging(answers) == [
+            (None, None, None),
+            (None, None, "page-3"),
+            (None, 5, None),
+        ]
+
+    def test_total_is_what_the_first_answer_reports(self, pure1_client):
+        """Pure1 counts again for every page, and items come and go."""
+        items = _hardware(9)
+        first = paged_answers("HardwareGetResponse", items, 3, total_item_count=8)
+        later = paged_answers("HardwareGetResponse", items, 3, total_item_count=9)
+
+        def answer(**kwargs):
+            return (later if "offset" in kwargs else first)(**kwargs)
+
+        pure1_client.get_hardware.side_effect = answer
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_hardware",
+            lambda **page: pure1_client.get_hardware(sort=["name", "id"], **page),
+        )
+
+        assert listing == Pure1Listing(items, 8, False)
+        assert _paging(later) == [(None, 3, None), (None, 6, None)]
+
+    def test_error_answer_fails_the_task(self, pure1_client):
+        pure1_client.get_hardware.return_value = error_response(
+            400, "Illegal filter format", "Unexpected input at character 9"
+        )
+
+        msg = _list_failure(
+            ansible_module(),
+            lambda **page: pure1_client.get_hardware(filter="name='o'brien'", **page),
+        )
+
+        assert msg == (
+            "Pure1 request get_hardware failed (HTTP 400): "
+            "Illegal filter format: Unexpected input at character 9"
+        )
+
+    def test_raised_error_fails_the_task(self, pure1_client):
+        pure1_client.get_hardware.side_effect = _read_timeout()
+
+        msg = _list_failure(
+            ansible_module(),
+            lambda **page: pure1_client.get_hardware(sort=["name"], **page),
+            limit=5,
+        )
+
+        assert msg == (
+            "Pure1 request get_hardware failed: ReadTimeoutError: "
+            "HTTPSConnectionPool(host='api.pure1.purestorage.com', port=443): "
+            "Read timed out. (read timeout=15.0)"
+        )
+
+    @pytest.mark.parametrize("limit", [None, 2])
+    def test_error_while_the_page_of_a_token_is_read_fails_the_task(self, limit):
+        """The SDK raises out of the iteration when it cannot fetch the page."""
+
+        def next_page(**kwargs):
+            raise _read_timeout()
+
+        response = _paged_response([sdk_model("Hardware", name="hw-0")], next_page)
+
+        msg = _list_failure(ansible_module(), lambda **page: response, limit=limit)
+
+        assert msg == (
+            "Pure1 request get_hardware failed: PureError: Failed to collect more "
+            "items: HTTPSConnectionPool(host='api.pure1.purestorage.com', port=443): "
+            "Read timed out. (read timeout=15.0)"
+        )
+
+    def test_page_of_a_token_that_the_limit_does_not_need_is_not_read(self):
+        def next_page(**kwargs):
+            pytest.fail("pure1_list fetched a page the limit does not need")
+
+        hardware = sdk_model("Hardware", name="hw-0")
+        response = _paged_response([hardware], next_page)
+
+        listing = pure1_list(
+            ansible_module(), "get_hardware", lambda **page: response, limit=1
+        )
+
+        assert listing == Pure1Listing([hardware], 2, True)
+
+    @pytest.mark.parametrize(
+        "failure, expected",
+        [
+            pytest.param(
+                lambda: error_response(503, "Service unavailable"),
+                "Pure1 request get_hardware failed (HTTP 503): Service unavailable",
+                id="error answer",
+            ),
+            pytest.param(
+                PureError("no route to Pure1"),
+                "Pure1 request get_hardware failed: PureError: no route to Pure1",
+                id="raised error",
+            ),
+        ],
+    )
+    def test_error_for_a_page_by_offset_fails_the_task(
+        self, pure1_client, failure, expected
+    ):
+        """No listing is returned short because a later page failed."""
+        _serve(pure1_client)
+
+        def request(**page):
+            if page.get("offset") == 6:
+                if isinstance(failure, Exception):
+                    raise failure
+                return failure()
+            return pure1_client.get_hardware(sort=["name", "id"], **page)
+
+        assert _list_failure(ansible_module(), request) == expected
+
+    def test_error_answer_can_be_raised_to_the_module(self, pure1_client):
+        module = ansible_module()
+        pure1_client.get_hardware.return_value = error_response(
+            404, "Not found", "No resources with name: hw-9"
+        )
+
+        with pytest.raises(Pure1RequestError) as raised:
+            pure1_list(
+                module,
+                "get_hardware",
+                lambda **page: pure1_client.get_hardware(names=["hw-9"], **page),
+                fail=False,
+            )
+
+        error = raised.value
+        assert error.action == "get_hardware"
+        assert error.status_code == 404
+        assert error.text == "Not found: No resources with name: hw-9"
+        module.fail_json.assert_not_called()
+
+    def test_error_for_a_later_page_can_be_raised_to_the_module(self, pure1_client):
+        module = ansible_module()
+        _serve(pure1_client)
+
+        def request(**page):
+            if "offset" in page:
+                raise _read_timeout()
+            return pure1_client.get_hardware(sort=["name", "id"], **page)
+
+        with pytest.raises(Pure1RequestError) as raised:
+            pure1_list(module, "get_hardware", request, fail=False)
+
+        assert raised.value.status_code is None
+        assert str(raised.value) == (
+            "Pure1 request get_hardware failed: ReadTimeoutError: "
+            "HTTPSConnectionPool(host='api.pure1.purestorage.com', port=443): "
+            "Read timed out. (read timeout=15.0)"
+        )
+        module.fail_json.assert_not_called()
+
+    @pytest.mark.parametrize("fail", [True, False])
+    def test_limit_below_0_fails_the_task(self, pure1_client, fail):
+        module = ansible_module()
+
+        def request(**page):
+            return pure1_client.get_hardware(**page)
+
+        with pytest.raises(SystemExit):
+            pure1_list(module, "get_hardware", request, limit=-1, fail=fail)
+
+        module.fail_json.assert_called_once_with(msg="limit must be 0 or more, got -1")
+        pure1_client.get_hardware.assert_not_called()
+
+
+class TestRequestTooLong:
+    """A request that is too long for Pure1 fails with a line that says so."""
+
+    def test_text(self):
+        assert REQUEST_TOO_LONG == TOO_LONG
+
+    @pytest.mark.parametrize("helper", REQUEST_HELPERS)
+    def test_answer_that_is_no_json_is_a_request_too_long(self, helper):
+        """Up to 8192 bytes Pure1 answers HTTP 400 with an HTML page."""
+        module = ansible_module()
+        answer = _gateway_refusal()
+        assert answer.errors[0].message == "Response is not a valid JSON"
+
+        msg = _request_failure(helper, module, lambda **page: answer)
+
+        assert msg == "Pure1 request get_pods failed (HTTP 400): " + TOO_LONG
+
+    @pytest.mark.parametrize("helper", REQUEST_HELPERS)
+    def test_http_414_is_a_request_too_long(self, pure1_client, helper):
+        """Above 8192 bytes py-pure-client raises, with the headers in the text."""
+        pure1_client.get_pods.side_effect = _uri_too_long()
+        assert "HTTP response headers" in str(_uri_too_long())
+
+        msg = _request_failure(
+            helper,
+            ansible_module(),
+            lambda **page: pure1_client.get_pods(filter="name=('a','b')", **page),
+        )
+
+        assert msg == "Pure1 request get_pods failed (HTTP 414): " + TOO_LONG
+
+    @pytest.mark.parametrize("helper", [pure1_items, pure1_list])
+    def test_http_414_for_a_later_page_is_a_request_too_long(self, helper):
+        """The token of the next page makes the request longer."""
+
+        def next_page(**kwargs):
+            raise _uri_too_long()
+
+        response = _paged_response([sdk_model("Pod", name="pod-a")], next_page)
+
+        msg = _request_failure(helper, ansible_module(), lambda **page: response)
+
+        assert msg == "Pure1 request get_pods failed (HTTP 414): " + TOO_LONG
+
+    @pytest.mark.parametrize("helper", [pure1_items, pure1_list])
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(GATEWAY_PAGE, id="HTML page"),
+            pytest.param("Bad Request", id="text"),
+            pytest.param(None, id="no body"),
+        ],
+    )
+    def test_http_400_without_json_for_a_later_page_is_a_request_too_long(
+        self, helper, body
+    ):
+        """What py-pure-client goes by for the first page: a body that is no JSON."""
+        response = _answer_with_a_refused_later_page(body)
+
+        msg = _request_failure(helper, ansible_module(), lambda **page: response)
+
+        assert msg == "Pure1 request get_pods failed (HTTP 400): " + TOO_LONG
+
+    @pytest.mark.parametrize("helper", [pure1_items, pure1_list])
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(ILLEGAL_FILTER, id="error of Pure1"),
+            pytest.param("[]", id="JSON that is no error"),
+        ],
+    )
+    def test_http_400_with_json_for_a_later_page_keeps_its_text(self, helper, body):
+        """A request that Pure1 refuses for what it asks is not too long."""
+        response = _answer_with_a_refused_later_page(body)
+
+        msg = _request_failure(helper, ansible_module(), lambda **page: response)
+
+        assert msg == (
+            "Pure1 request get_pods failed: PureError: Failed to collect more "
+            "items: (400) Reason: Bad Request"
+        )
+
+    @pytest.mark.parametrize("helper", [pure1_items, pure1_list])
+    def test_refused_later_page_can_be_raised_to_the_module(self, helper):
+        module = ansible_module()
+        response = _answer_with_a_refused_later_page()
+
+        with pytest.raises(Pure1RequestError) as raised:
+            helper(module, "get_pods", lambda **page: response, fail=False)
+
+        assert raised.value.status_code == 400
+        assert raised.value.text == TOO_LONG
+        module.fail_json.assert_not_called()
+
+    @pytest.mark.parametrize("helper", REQUEST_HELPERS)
+    @pytest.mark.parametrize(
+        "failure, status_code",
+        [
+            pytest.param(_gateway_refusal, 400, id="HTTP 400"),
+            pytest.param(_uri_too_long, 414, id="HTTP 414"),
+        ],
+    )
+    def test_can_be_raised_to_the_module(self, helper, failure, status_code):
+        module = ansible_module()
+
+        def request(**page):
+            failed = failure()
+            if isinstance(failed, Exception):
+                raise failed
+            return failed
+
+        with pytest.raises(Pure1RequestError) as raised:
+            helper(module, "get_pods", request, fail=False)
+
+        assert raised.value.status_code == status_code
+        assert raised.value.text == TOO_LONG
+        module.fail_json.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "response, expected",
+        [
+            pytest.param(
+                _refusal_of_pure1(
+                    '{"errors":[{"message":"Illegal filter format","context":'
+                    "\"Unexpected input at character 9: name='o'brien'\"}]}"
+                ),
+                "(HTTP 400): Illegal filter format: "
+                "Unexpected input at character 9: name='o'brien'",
+                id="HTTP 400 of Pure1",
+            ),
+            pytest.param(
+                _refusal_of_pure1("[]"),
+                "(HTTP 400): Response is not an Error object",
+                id="JSON that is no error",
+            ),
+            pytest.param(
+                ErrorResponse(
+                    404, [ApiError(None, "Response is not a valid JSON")], {}
+                ),
+                "(HTTP 404): Response is not a valid JSON",
+                id="another status",
+            ),
+            pytest.param(
+                ErrorResponse(
+                    400,
+                    [ApiError("at character 9", "Response is not a valid JSON")],
+                    {},
+                ),
+                "(HTTP 400): Response is not a valid JSON: at character 9",
+                id="message with a context",
+            ),
+            pytest.param(
+                ErrorResponse(
+                    400,
+                    [
+                        ApiError(None, "Response is not a valid JSON"),
+                        ApiError(None, "Invalid value"),
+                    ],
+                    {},
+                ),
+                "(HTTP 400): Response is not a valid JSON; Invalid value",
+                id="one of two errors",
+            ),
+            pytest.param(
+                ErrorResponse(400, [], {}), "(HTTP 400): Bad Request", id="none"
+            ),
+        ],
+    )
+    def test_another_error_answer_keeps_its_message(self, response, expected):
+        msg = _request_failure(pure1_items, ansible_module(), lambda: response)
+
+        assert msg == "Pure1 request get_pods failed " + expected
+
+    @pytest.mark.parametrize(
+        "error, expected",
+        [
+            pytest.param(
+                PureError(ApiException(status=413, reason="Payload Too Large")),
+                "PureError: (413) Reason: Payload Too Large",
+                id="another status",
+            ),
+            pytest.param(
+                PureError("Could not read page (414)"),
+                "PureError: Could not read page (414)",
+                id="414 elsewhere in the text",
+            ),
+            pytest.param(
+                RuntimeError("PureError: (414)"),
+                "RuntimeError: PureError: (414)",
+                id="another exception",
+            ),
+            pytest.param(
+                PureError(
+                    "Could not retrieve a new access token: {0}".format(_uri_too_long())
+                ),
+                "PureError: Could not retrieve a new access token: "
+                "PureError: (414) Reason: Request-URI Too Large",
+                id="414 of another request",
+            ),
+            pytest.param(
+                PureError("Failed to collect more items: (404)\nReason: Not Found\n"),
+                "PureError: Failed to collect more items: (404) Reason: Not Found",
+                id="another status of a later page",
+            ),
+            pytest.param(
+                PureError(
+                    "Retry failed: PureError: Failed to collect more items: "
+                    "{0}".format(_refused_later_page())
+                ),
+                "PureError: Retry failed: PureError: Failed to collect more "
+                "items: (400) Reason: Bad Request",
+                id="400 of a later page elsewhere in the text",
+            ),
+            pytest.param(
+                RuntimeError(
+                    "PureError: Failed to collect more items: "
+                    "{0}".format(_refused_later_page())
+                ),
+                "RuntimeError: PureError: Failed to collect more items: "
+                "(400) Reason: Bad Request",
+                id="another exception for a later page",
+            ),
+        ],
+    )
+    def test_another_raised_error_keeps_its_text(self, pure1_client, error, expected):
+        pure1_client.get_pods.side_effect = error
+        module = ansible_module()
+
+        with pytest.raises(Pure1RequestError) as raised:
+            pure1_items(
+                module, "get_pods", lambda: pure1_client.get_pods(limit=5), fail=False
+            )
+
+        assert raised.value.status_code is None
+        assert str(raised.value) == "Pure1 request get_pods failed: " + expected
+
+    def test_error_text_of_http_414(self):
+        """For a module that words the message of a raised error itself."""
+        module = ansible_module()
+        later_page = PureError(
+            "Failed to collect more items: {0}".format(_uri_too_long())
+        )
+
+        assert pure1_error_text(module, _uri_too_long()) == TOO_LONG
+        assert pure1_error_text(module, later_page) == TOO_LONG
+
+    def test_error_text_of_http_400_for_a_later_page(self):
+        module = ansible_module()
+        text = "Failed to collect more items: {0}"
+        gateway = PureError(text.format(_refused_later_page()))
+        pure1 = PureError(text.format(_refused_later_page(ILLEGAL_FILTER)))
+
+        assert pure1_error_text(module, gateway) == TOO_LONG
+        assert pure1_error_text(module, pure1) == (
+            "PureError: Failed to collect more items: (400) Reason: Bad Request"
+        )
+
+    @pytest.mark.parametrize(
+        "failure, status_code",
+        [
+            pytest.param(_gateway_refusal, 400, id="HTTP 400"),
+            pytest.param(_uri_too_long, 414, id="HTTP 414"),
+        ],
+    )
+    def test_too_many_array_names_fail_the_task(
+        self, pure1_client, failure, status_code
+    ):
+        """pure1_resolve_arrays sends every name in one request."""
+        failed = failure()
+        if isinstance(failed, Exception):
+            pure1_client.get_arrays.side_effect = failed
+        else:
+            pure1_client.get_arrays.return_value = failed
+        module = ansible_module()
+        names = ["array-{0:03d}".format(number) for number in range(300)]
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_arrays(module, pure1_client, names)
+
+        module.fail_json.assert_called_once_with(
+            msg="Pure1 request get_arrays failed (HTTP {0}): {1}".format(
+                status_code, TOO_LONG
+            )
+        )
+        assert pure1_client.get_arrays.call_count == 1
+
+
+class TestFilterIn:
+    """filter_in gives the term for a field that equals one of the values."""
+
+    @pytest.mark.parametrize(
+        "values, expected",
+        [
+            pytest.param(["a"], "arrays.name='a'", id="one value"),
+            pytest.param(["a", "b"], "arrays.name=('a','b')", id="two values"),
+            pytest.param(
+                ["c", "a", "b"], "arrays.name=('c','a','b')", id="order is kept"
+            ),
+            pytest.param([], None, id="no value"),
+            pytest.param(None, None, id="None"),
+            pytest.param(["a", "b", "a"], "arrays.name=('a','b')", id="value twice"),
+            pytest.param(["a", "a"], "arrays.name='a'", id="one value twice"),
+            pytest.param(["a", "A"], "arrays.name=('a','A')", id="case is kept"),
+            pytest.param(
+                ["o'brien", "a\\b"],
+                "arrays.name=('o\\'brien','a\\\\b')",
+                id="values are escaped",
+            ),
+            pytest.param(("a", "b"), "arrays.name=('a','b')", id="tuple"),
+            pytest.param("ab", "arrays.name='ab'", id="a string is one value"),
+            pytest.param([""], "arrays.name=''", id="empty value"),
+        ],
+    )
+    def test_term(self, values, expected):
+        assert filter_in("arrays.name", values) == expected
+
+    def test_field_is_used_as_given(self):
+        assert filter_in("on.name", ["a", "b"]) == "on.name=('a','b')"
+
+
+UNMATCHED = "The parentheses or the quotes of the filter term do not match: "
+# Terms that, joined to others with and, would not stay one term
+UNMATCHED_TERMS = [
+    pytest.param("a='x') or (b='y'", id="closed before it is opened"),
+    pytest.param("a='x')) or ((b='y'", id="closed twice before it is opened"),
+    pytest.param("(a='x' or b='y'", id="left open"),
+    pytest.param("a='x' or b='y')", id="closed once too often"),
+    pytest.param("a='x' or b='y", id="string left open"),
+    pytest.param("a='x\\'", id="string that ends in an escaped quote"),
+]
+
+
+class TestFilterRaw:
+    """filter_raw makes one term of a filter the task wrote."""
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            pytest.param(None, None, id="None"),
+            pytest.param("", None, id="empty"),
+            pytest.param("  \n", None, id="blank"),
+            pytest.param("a='x'", "(a='x')", id="one comparison"),
+            pytest.param(" a='x' or b='y' ", "(a='x' or b='y')", id="stripped"),
+            pytest.param("(a='x')", "((a='x'))", id="always in parentheses"),
+        ],
+    )
+    def test_term(self, text, expected):
+        assert filter_raw(text) == expected
+
+    @pytest.mark.parametrize("text", UNMATCHED_TERMS)
+    def test_filter_that_would_not_stay_one_term_is_refused(self, text):
+        """Parentheses around it would not hold it together."""
+        with pytest.raises(ValueError) as refused:
+            filter_raw(text)
+
+        assert str(refused.value) == UNMATCHED + text
+
+    def test_refused_filter_is_reported_as_the_task_wrote_it(self):
+        with pytest.raises(ValueError) as refused:
+            filter_raw("  a='x') or (b='y' ")
+
+        assert str(refused.value) == UNMATCHED + "a='x') or (b='y'"
+
+
+class TestFilterAnd:
+    """filter_and joins the terms that every item must match."""
+
+    @pytest.mark.parametrize(
+        "terms, expected",
+        [
+            pytest.param((), None, id="no term"),
+            pytest.param((None, "", "  "), None, id="only empty terms"),
+            pytest.param(("a='x'",), "a='x'", id="one term"),
+            pytest.param(("a='x'", "b>=5"), "a='x' and b>=5", id="two terms"),
+            pytest.param(
+                (None, "a='x'", "", "b>=5", None, "c<7"),
+                "a='x' and b>=5 and c<7",
+                id="empty terms are left out",
+            ),
+            pytest.param((" a='x' ", "b>=5\n"), "a='x' and b>=5", id="stripped"),
+            pytest.param(
+                ("a='x' or b='y'", "c='z'"),
+                "(a='x' or b='y') and c='z'",
+                id="or at the top level",
+            ),
+            pytest.param(
+                ("c='z'", "a='x' or b='y'"),
+                "c='z' and (a='x' or b='y')",
+                id="or in the last term",
+            ),
+            pytest.param(("a='x' or b='y'",), "(a='x' or b='y')", id="or alone"),
+            pytest.param(
+                ("a='x'or b='y'", "c='z'"),
+                "(a='x'or b='y') and c='z'",
+                id="or straight after a string",
+            ),
+            pytest.param(
+                ("(a='x') or (b='y')", "c='z'"),
+                "((a='x') or (b='y')) and c='z'",
+                id="or between parentheses",
+            ),
+            pytest.param(
+                ("contains(a,'x')or contains(b,'y')", "c='z'"),
+                "(contains(a,'x')or contains(b,'y')) and c='z'",
+                id="or straight after a parenthesis",
+            ),
+            pytest.param(
+                ("(a='x' or b='y')", "c='z'"),
+                "(a='x' or b='y') and c='z'",
+                id="or in parentheses",
+            ),
+            pytest.param(
+                ("a='this or that'", "c='z'"),
+                "a='this or that' and c='z'",
+                id="or in a string",
+            ),
+            pytest.param(
+                ("a='it\\'s or not'", "c='z'"),
+                "a='it\\'s or not' and c='z'",
+                id="or in a string after an escaped quote",
+            ),
+            pytest.param(
+                ("a='x\\\\' or b='y'", "c='z'"),
+                "(a='x\\\\' or b='y') and c='z'",
+                id="or after a string that ends in a backslash",
+            ),
+            pytest.param(
+                ("a='(' or b=')'", "c='z'"),
+                "(a='(' or b=')') and c='z'",
+                id="parentheses in strings",
+            ),
+            pytest.param(
+                ("contains(model,'or')", "tags('or','or')"),
+                "contains(model,'or') and tags('or','or')",
+                id="or in a function",
+            ),
+            pytest.param(
+                ("color='red'", "orbit>1", "floor<3"),
+                "color='red' and orbit>1 and floor<3",
+                id="or in a word",
+            ),
+            pytest.param(
+                ("a='x' and b='y'", "c='z'"),
+                "a='x' and b='y' and c='z'",
+                id="and needs no parentheses",
+            ),
+        ],
+    )
+    def test_filter(self, terms, expected):
+        assert filter_and(*terms) == expected
+
+    @pytest.mark.parametrize("term", UNMATCHED_TERMS)
+    def test_term_that_would_not_stay_one_term_is_refused(self, term):
+        """It would take the terms beside it apart."""
+        with pytest.raises(ValueError) as refused:
+            filter_and("c='z'", term, "d>=5")
+
+        assert str(refused.value) == UNMATCHED + term
+
+    def test_values_of_filter_in_are_terms_whatever_they_hold(self):
+        """A quoted value never leaves a string or a parenthesis open."""
+        names = filter_in("name", ["a)", "(b", "o'brien", "c\\", " or "])
+
+        assert filter_and(names, "d>=5") == (
+            "name=('a)','(b','o\\'brien','c\\\\',' or ') and d>=5"
+        )
+
+    def test_terms_of_the_helpers_and_of_the_task(self):
+        """What a module joins: arrays, a time bound and a filter of the task."""
+        result = filter_and(
+            filter_in("arrays.name", ["a", "b"]),
+            "time>=1612357445000",
+            filter_raw("command='purevol' or command='purehost'"),
+            filter_in("user", None),
+            filter_raw(None),
+        )
+
+        assert result == (
+            "arrays.name=('a','b') and time>=1612357445000 "
+            "and (command='purevol' or command='purehost')"
+        )
+
+
+class TestPure1Time:
+    """pure1_time gives the milliseconds of Pure1 as a time in UTC."""
+
+    @pytest.mark.usefixtures("localtime_ahead_of_utc")
+    @pytest.mark.parametrize(
+        "milliseconds, expected",
+        [
+            pytest.param(1612357445000, "2021-02-03 13:04:05 UTC", id="time"),
+            pytest.param(1612357445999, "2021-02-03 13:04:05 UTC", id="milliseconds"),
+            pytest.param(0, "1970-01-01 00:00:00 UTC", id="0 is a time"),
+            pytest.param(None, None, id="None"),
+        ],
+    )
+    def test_time(self, milliseconds, expected):
+        assert pure1_time(milliseconds) == expected
+
+    @pytest.mark.usefixtures("host_west_of_utc")
+    def test_time_zone_of_the_host_does_not_count(self):
+        # the host is five hours behind UTC
+        assert time.localtime(1612357445)[3] == 8
+        assert pure1_time(1612357445000) == "2021-02-03 13:04:05 UTC"
+
+
+class TestPure1Attr:
+    """pure1_attr reads a field of an SDK model that may not be set."""
+
+    def test_field_of_a_reference(self):
+        pod = sdk_model("FixedReference", name="pod1", id="p-1")
+        volume = sdk_model("Volume", name="pod1::v1", pod=pod)
+
+        assert pure1_attr(volume, "pod.name") == "pod1"
+        assert pure1_attr(volume, "name") == "pod1::v1"
+        assert pure1_attr(volume, "pod") is volume.pod
+
+    @pytest.mark.parametrize("default", [None, "-"])
+    def test_default_for_what_is_not_set(self, default):
+        """A field Pure1 did not send, and a reference with no field set."""
+        volume = sdk_model("Volume", name="v1", source=sdk_model("FixedReference"))
+        options = {} if default is None else {"default": default}
+
+        assert pure1_attr(volume, "pod.name", **options) == default
+        assert pure1_attr(volume, "pod", **options) == default
+        assert pure1_attr(volume, "serial", **options) == default
+        assert pure1_attr(volume, "source.name", **options) == default
+        assert pure1_attr(volume, "source.name.first", **options) == default
+        assert pure1_attr(volume, "no_such_field.name", **options) == default
+
+    def test_default_for_none(self):
+        """An entry of a list that Pure1 sends as null."""
+        pod = sdk_model("Pod", name="pod1", arrays=[])
+        pod.arrays.append(None)
+
+        assert pure1_attr(pod.arrays[0], "name") is None
+        assert pure1_attr(pod.arrays[0], "name", "-") == "-"
+        assert pure1_attr(None, "fleet.name", default="none") == "none"
+
+    def test_default_is_the_third_argument(self):
+        assert pure1_attr(sdk_model("Volume", name="v1"), "pod.name", "-") == "-"
+
+    def test_value_that_is_set_is_not_replaced(self):
+        hardware = sdk_model(
+            "Hardware", name="", slot=0, identify_enabled=False, arrays=[]
+        )
+
+        assert pure1_attr(hardware, "slot", -1) == 0
+        assert pure1_attr(hardware, "name", "-") == ""
+        assert pure1_attr(hardware, "identify_enabled", True) is False
+        assert pure1_attr(hardware, "arrays", "-") == []
+
+    def test_field_of_a_list_is_not_set(self):
+        """A path does not go through the entries of a list."""
+        pod = sdk_model("Pod", name="pod1", arrays=[sdk_model("FixedReferenceFqdn")])
+
+        assert pure1_attr(pod, "arrays.name", "-") == "-"
+
+    def test_method_is_no_field(self):
+        """A path that names a method of a value, as count of a list."""
+        pod = sdk_model("Pod", name="pod1", arrays=[])
+
+        assert pure1_attr(pod, "arrays.count", "-") == "-"
+        assert pure1_attr(pod, "name.upper", "-") == "-"
+        assert pure1_attr(pod, "to_dict") is None
+
+    def test_empty_reference_of_an_array(self):
+        """An array in no fleet has a fleet reference with no field set."""
+        array = _array("array1", fleet=sdk_model("FixedReference"))
+
+        assert pure1_attr(array, "fleet.name") is None
+        assert pure1_attr(array, "topology_group.name") is None
+
+
+class TestPure1ResolveArrays:
+    """pure1_resolve_arrays finds the arrays of the names a task gives."""
+
+    @pytest.mark.parametrize("names", [None, []])
+    def test_no_names_is_no_selection(self, pure1_client, names):
+        module = ansible_module()
+
+        assert pure1_resolve_arrays(module, pure1_client, names) is None
+        pure1_client.get_arrays.assert_not_called()
+        module.fail_json.assert_not_called()
+
+    def test_one_name_is_looked_up_with_an_equality(self, pure1_client):
+        """In the case of the task: Pure1 compares a name whatever its case."""
+        pure1_client.get_arrays.return_value = valid_response(
+            [
+                _array(
+                    "array1",
+                    id="id-1",
+                    fqdn="array1.example.com",
+                    os="Purity//FA",
+                    model="FA-X70R4",
+                    version="6.5.0",
+                    fleet=sdk_model("FixedReference", name="fleet1"),
+                )
+            ]
+        )
+        module = ansible_module()
+
+        arrays = pure1_resolve_arrays(module, pure1_client, ["ARRAY1"])
+
+        assert arrays == [
+            {
+                "id": "id-1",
+                "name": "array1",
+                "fqdn": "array1.example.com",
+                "os": "Purity//FA",
+                "model": "FA-X70R4",
+                "version": "6.5.0",
+            }
+        ]
+        pure1_client.get_arrays.assert_called_once_with(filter="name='ARRAY1'")
+        module.fail_json.assert_not_called()
+
+    def test_name_comes_back_as_pure1_spells_it(self, pure1_client):
+        """Also where Pure1 writes capitals and the task does not."""
+        pure1_client.get_arrays.return_value = valid_response(
+            [_array("Array1", id="1")]
+        )
+
+        arrays = pure1_resolve_arrays(ansible_module(), pure1_client, ["array1"])
+
+        assert [array["name"] for array in arrays] == ["Array1"]
+
+    @pytest.mark.parametrize(
+        "names",
+        [
+            pytest.param([""], id="the only"),
+            pytest.param(["a", ""], id="one of two"),
+            pytest.param(["  "], id="blank"),
+        ],
+    )
+    def test_empty_name_fails_the_task(self, pure1_client, names):
+        """Pure1 answers it with no array, and the message would name nothing."""
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_arrays(module, pure1_client, names)
+
+        module.fail_json.assert_called_once_with(
+            msg="The name of an array must not be empty."
+        )
+        pure1_client.get_arrays.assert_not_called()
+
+    def test_several_names_come_back_in_the_order_of_the_task(self, pure1_client):
+        pure1_client.get_arrays.return_value = valid_response(
+            [_array("a", id="1"), _array("b", id="2"), _array("c", id="3")]
+        )
+
+        arrays = pure1_resolve_arrays(ansible_module(), pure1_client, ["c", "A", "b"])
+
+        assert [(array["name"], array["id"]) for array in arrays] == [
+            ("c", "3"),
+            ("a", "1"),
+            ("b", "2"),
+        ]
+        pure1_client.get_arrays.assert_called_once_with(filter="name=('c','A','b')")
+
+    def test_field_pure1_did_not_send_is_none(self, pure1_client):
+        """A Cloud Block Store has no fqdn."""
+        pure1_client.get_arrays.return_value = valid_response([_array("cbs1")])
+
+        arrays = pure1_resolve_arrays(ansible_module(), pure1_client, ["cbs1"])
+
+        assert arrays == [
+            {
+                "id": None,
+                "name": "cbs1",
+                "fqdn": None,
+                "os": None,
+                "model": None,
+                "version": None,
+            }
+        ]
+
+    def test_name_given_twice_is_one_array(self, pure1_client):
+        pure1_client.get_arrays.return_value = valid_response(
+            [_array("a", id="1"), _array("b", id="2")]
+        )
+
+        arrays = pure1_resolve_arrays(
+            ansible_module(), pure1_client, ["a", "B", "A", "a", "b"]
+        )
+
+        assert [array["name"] for array in arrays] == ["a", "b"]
+        pure1_client.get_arrays.assert_called_once_with(filter="name=('a','B','A','b')")
+
+    def test_name_is_escaped(self, pure1_client):
+        pure1_client.get_arrays.return_value = valid_response([_array("o'brien")])
+
+        arrays = pure1_resolve_arrays(ansible_module(), pure1_client, ["o'brien"])
+
+        assert [array["name"] for array in arrays] == ["o'brien"]
+        pure1_client.get_arrays.assert_called_once_with(filter="name='o\\'brien'")
+
+    def test_arrays_of_every_page_are_found(self, pure1_client):
+        found = [_array("array{0}".format(number)) for number in range(5)]
+        answers = paged_answers("ArrayGetResponse", found, page_size=2)
+        pure1_client.get_arrays.side_effect = answers
+        names = [array.name for array in found]
+
+        arrays = pure1_resolve_arrays(ansible_module(), pure1_client, names)
+
+        assert [array["name"] for array in arrays] == names
+        assert len(answers.requests) == 3
+
+    @pytest.mark.parametrize(
+        "names, expected",
+        [
+            pytest.param(["foo"], "Array foo is not known to Pure1.", id="the only"),
+            pytest.param(
+                ["a", "Foo"], "Array Foo is not known to Pure1.", id="one of two"
+            ),
+            pytest.param(
+                ["foo", "a", "Bar"],
+                "Arrays foo, Bar are not known to Pure1.",
+                id="two of three",
+            ),
+            pytest.param(
+                ["foo", "foo"], "Array foo is not known to Pure1.", id="given twice"
+            ),
+        ],
+    )
+    def test_unknown_name_fails_the_task(self, pure1_client, names, expected):
+        """Pure1 ignores a name it does not know: the names are as the task wrote them."""
+        pure1_client.get_arrays.return_value = valid_response([_array("a", id="1")])
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_arrays(module, pure1_client, names)
+
+        module.fail_json.assert_called_once_with(msg=expected)
+
+    def test_array_that_was_not_asked_for_is_left_out(self, pure1_client):
+        """Also one that Pure1 sends without a name."""
+        pure1_client.get_arrays.return_value = valid_response(
+            [_array("a", id="1"), _array("other", id="2"), sdk_model("Array", id="3")]
+        )
+
+        arrays = pure1_resolve_arrays(ansible_module(), pure1_client, ["a"])
+
+        assert [array["id"] for array in arrays] == ["1"]
+
+    def test_spelling_of_the_task_wins_over_another_case(self, pure1_client):
+        pure1_client.get_arrays.return_value = valid_response(
+            [_array("Array1", id="1"), _array("array1", id="2")]
+        )
+
+        arrays = pure1_resolve_arrays(ansible_module(), pure1_client, ["array1"])
+
+        assert [(array["name"], array["id"]) for array in arrays] == [("array1", "2")]
+
+    def test_name_in_two_other_cases_fails_the_task(self, pure1_client):
+        pure1_client.get_arrays.return_value = valid_response(
+            [_array("array1", id="2"), _array("Array1", id="1")]
+        )
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_arrays(module, pure1_client, ["ARRAY1"])
+
+        module.fail_json.assert_called_once_with(
+            msg="Pure1 knows more than one array whose name is ARRAY1 in another "
+            "case: Array1, array1. Give the name as Pure1 spells it."
+        )
+
+    def test_two_arrays_of_one_name_are_both_returned(self, pure1_client):
+        pure1_client.get_arrays.return_value = valid_response(
+            [_array("a", id="1"), _array("a", id="2")]
+        )
+
+        arrays = pure1_resolve_arrays(ansible_module(), pure1_client, ["A", "a"])
+
+        assert [(array["name"], array["id"]) for array in arrays] == [
+            ("a", "1"),
+            ("a", "2"),
+        ]
+
+    def test_error_answer_fails_the_task(self, pure1_client):
+        pure1_client.get_arrays.return_value = error_response(403)
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_arrays(module, pure1_client, ["a"])
+
+        module.fail_json.assert_called_once_with(
+            msg="Pure1 request get_arrays failed (HTTP 403): Forbidden"
+        )
+
+    def test_raised_error_fails_the_task(self, pure1_client):
+        pure1_client.get_arrays.side_effect = PureError("no route to Pure1")
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_arrays(module, pure1_client, ["a", "b"])
+
+        module.fail_json.assert_called_once_with(
+            msg="Pure1 request get_arrays failed: PureError: no route to Pure1"
+        )
+
+
+class TestPure1Require:
+    """pure1_require fails the task on a py-pure-client without the method."""
+
+    MISSING = "get_things_of_a_later_release"
+
+    def _message(self, pure1_client):
+        module = ansible_module()
+        with pytest.raises(SystemExit):
+            pure1_require(module, pure1_client, self.MISSING, "1.101.0")
+        module.fail_json.assert_called_once()
+        return module.fail_json.call_args[1]["msg"]
+
+    def test_method_of_the_client_is_enough(self, pure1_client):
+        module = ansible_module()
+
+        assert pure1_require(module, pure1_client, "get_fleets", "1.99.0") is None
+        module.fail_json.assert_not_called()
+        # the method is looked at, not called
+        pure1_client.get_fleets.assert_not_called()
+
+    def test_missing_method_names_what_is_needed_and_what_is_installed(
+        self, pure1_client, monkeypatch
+    ):
+        monkeypatch.setattr(pypureclient, "__version__", "1.98.0")
+
+        assert self._message(pure1_client) == (
+            "py-pure-client 1.101.0 or later is required: this module needs "
+            "Client.get_things_of_a_later_release(), which the installed "
+            "py-pure-client 1.98.0 does not have."
+        )
+
+    def test_installed_release_is_the_one_of_the_sdk(self, pure1_client):
+        release = importlib.metadata.version("py-pure-client")
+
+        assert "installed py-pure-client {0} does".format(release) in self._message(
+            pure1_client
+        )
+
+    def test_release_comes_from_the_package_data_of_an_sdk_without_version(
+        self, pure1_client, monkeypatch
+    ):
+        monkeypatch.delattr(pypureclient, "__version__")
+        monkeypatch.setattr(
+            importlib.metadata, "version", {"py-pure-client": "1.97.0"}.__getitem__
+        )
+
+        assert self._message(pure1_client) == (
+            "py-pure-client 1.101.0 or later is required: this module needs "
+            "Client.get_things_of_a_later_release(), which the installed "
+            "py-pure-client 1.97.0 does not have."
+        )
+
+    def test_release_that_cannot_be_read_is_left_out(self, pure1_client, monkeypatch):
+        def not_found(name):
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.delattr(pypureclient, "__version__")
+        monkeypatch.setattr(importlib.metadata, "version", not_found)
+
+        assert self._message(pure1_client) == (
+            "py-pure-client 1.101.0 or later is required: this module needs "
+            "Client.get_things_of_a_later_release(), which the installed "
+            "py-pure-client does not have."
+        )
+
+    @pytest.mark.parametrize(
+        "error", [RuntimeError("broken package data"), ValueError("no version")]
+    )
+    def test_no_error_while_the_release_is_read_is_raised(
+        self, pure1_client, monkeypatch, error
+    ):
+        """Whatever the package data raises: the message is what counts."""
+
+        def broken(name):
+            raise error
+
+        monkeypatch.delattr(pypureclient, "__version__")
+        monkeypatch.setattr(importlib.metadata, "version", broken)
+
+        assert self._message(pure1_client) == (
+            "py-pure-client 1.101.0 or later is required: this module needs "
+            "Client.get_things_of_a_later_release(), which the installed "
+            "py-pure-client does not have."
+        )
+
+    def test_sdk_that_cannot_be_imported_does_not_raise(self, pure1_client, no_sdk):
+        assert self._message(pure1_client).endswith(
+            "which the installed py-pure-client does not have."
+        )
+
+    def test_attribute_that_is_no_method_is_not_enough(self, pure1_client):
+        setattr(pure1_client, self.MISSING, "1.101.0")
+
+        assert "Client.get_things_of_a_later_release()" in self._message(pure1_client)
