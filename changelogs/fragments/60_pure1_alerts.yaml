@@ -1,0 +1,10 @@
+bugfixes:
+  - "pure1_alerts - a task that matches no alert now succeeds with an empty ``alert_info`` instead of failing."
+  - "pure1_alerts - an error answer from Pure1 or an error raised by py-pure-client now fails the task with its message instead of a traceback."
+  - "pure1_alerts - a single quote or a backslash in the array name is now escaped in the filter."
+  - "pure1_alerts - an alert without a code, a summary or an array no longer ends the task with a traceback."
+  - "pure1_alerts - the closed time of an alert is returned whenever the alert has one, not only with ``state=closed``."
+  - "pure1_alerts - the documentation describes the returned keys and the examples are valid tasks."
+minor_changes:
+  - "pure1_alerts - ``state`` accepts ``closing``."
+  - "pure1_alerts - each time of an alert is also returned in milliseconds since the epoch, as ``created_epoch``, ``updated_epoch``, ``notified_epoch`` and ``closed_epoch``."
