@@ -1,0 +1,311 @@
+# Copyright: (c) 2026, Everpure Ansible Team <pure-ansible-team@everpuredata.com>
+# GNU General Public License v3.0+ (see COPYING.GPLv3 or https://www.gnu.org/licenses/gpl-3.0.txt)
+
+"""Import set-up and shared building blocks of the unit tests.
+
+The code under test runs on the real ansible-core and the real py-pure-client.
+Only the connection is replaced: pure1.Client() gives a stand-in that has the
+methods and signatures of the SDK client. The test builds what it answers from
+the SDK response and model classes, and an answer the test did not give fails
+the test when the code reads it. The helpers are plain functions, to be
+imported from tests.unit.conftest; what changes state for one test is a
+fixture.
+"""
+
+from __future__ import absolute_import, division, print_function
+
+__metaclass__ = type
+
+import importlib
+import pkgutil
+import re
+import sys
+import types
+from unittest.mock import NonCallableMock, create_autospec, patch
+
+import pytest
+
+try:
+    from ansible.module_utils.basic import AnsibleModule
+    from ansible.module_utils.common.arg_spec import ArgumentSpecValidator
+    from ansible.module_utils.errors import UnsupportedError
+    from pypureclient import ApiError, ErrorResponse, ValidResponse
+    from pypureclient.responses import ItemIterator
+
+    # The module itself: the name pure1 in pypureclient starts as a lazy loader
+    SDK = importlib.import_module("pypureclient.pure1")
+except ImportError as error:
+    raise ImportError(
+        "the unit tests need ansible-core and py-pure-client: "
+        "python -m pip install -r tests/requirements.txt ({0})".format(error)
+    ) from error
+
+from plugins.module_utils import pure1 as pure1_utils
+
+# The modules import module_utils under its collection name. Nothing provides
+# that name without pytest-ansible, and with it the import would load a second
+# copy of the file. Both ways they get the module the tests import.
+sys.modules["ansible_collections.everpure.pure1.plugins.module_utils.pure1"] = (
+    pure1_utils
+)
+
+
+def _newest_pure1_package():
+    """Import the Pure1_x_y package of the SDK with the highest version.
+
+    Versions are compared as numbers, as tests/unit/test_sdk_contract.py does.
+    """
+    versions = {}
+    for info in pkgutil.iter_modules(SDK.__path__):
+        match = re.match(r"Pure1_(\d+)_(\d+)$", info.name)
+        if match:
+            versions[(int(match.group(1)), int(match.group(2)))] = info.name
+    return importlib.import_module(
+        "{0}.{1}".format(SDK.__name__, versions[max(versions)])
+    )
+
+
+NEWEST = _newest_pure1_package()
+MODELS = importlib.import_module(NEWEST.__name__ + ".models")
+CREDENTIALS = {
+    "app_id": "pure1-app-id",
+    "key_file": "/run/secrets/pure1.pem",
+    "password": None,
+}
+# The rules main() can give AnsibleModule beside the argument spec
+_SPEC_RULES = (
+    "mutually_exclusive",
+    "required_together",
+    "required_one_of",
+    "required_if",
+    "required_by",
+)
+_REAL_MODULES = dict(sys.modules)
+
+
+def pytest_collectreport():
+    """Take back what a test file that is not converted yet put in sys.modules.
+
+    Such a file replaces ansible, pypureclient and the collection's
+    module_utils by mocks before it imports its module. This runs before a
+    file is imported and when it has been collected, so every file is
+    imported, and every test runs, on the real modules. A plugin module keeps
+    what it was first imported with: until its own test file is converted, no
+    converted file may import it. Delete both hooks with the last sys.modules
+    block in tests/unit.
+    """
+    for name, module in list(sys.modules.items()):
+        if isinstance(module, NonCallableMock):
+            if name in _REAL_MODULES:
+                sys.modules[name] = _REAL_MODULES[name]
+            else:
+                del sys.modules[name]
+
+
+# Given node ids, pytest imports the next file before it reports on this one
+pytest_collectstart = pytest_collectreport
+
+
+class _NoAnswer:
+    """What a stand-in method returns until the test gives it an answer.
+
+    The code may drop it, as it drops the result of module.warn(). Reading an
+    attribute of it, or iterating it, fails the test.
+    """
+
+    def __init__(self, method):
+        self._method = method
+
+    def _fail(self, read):
+        pytest.fail(
+            "{0}() was called and the code read {1} of its answer: give {0} "
+            "a return_value or a side_effect".format(self._method, read)
+        )
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        self._fail("." + name)
+
+    def __iter__(self):
+        self._fail("the entries")
+
+
+class _StandIn:
+    """Stand-in for an instance of a class of ansible-core or of the SDK.
+
+    A method becomes a mock with the signature of the real one when it is
+    first used, and a name that is not a method of the class raises
+    AttributeError. create_autospec(cls, instance=True) gives the same but
+    mocks every method at once, which takes 50 ms for the Pure1 client.
+    """
+
+    def __init__(self, cls):
+        self._cls = cls
+
+    def __getattr__(self, name):
+        function = getattr(self._cls, name, None)
+        if not isinstance(function, types.FunctionType):
+            raise AttributeError(
+                "{0} is not a method of {1}; if the real object has it as an "
+                "attribute, set it on the stand-in".format(name, self._cls.__name__)
+            )
+        where = "{0}.{1}".format(self._cls.__name__, name)
+        method = create_autospec(types.MethodType(function, self))
+        if not isinstance(method, types.FunctionType):
+            # create_autospec could not read the signature and checks nothing
+            pytest.fail(
+                "{0} was first used while inspect.signature is patched: give "
+                "it its answer before the patch".format(where)
+            )
+        method.return_value = _NoAnswer(where)
+        setattr(self, name, method)
+        return method
+
+
+def ansible_module(check_mode=False, **params):
+    """Return an AnsibleModule stand-in with these params and credentials.
+
+    exit_json and fail_json end the call with SystemExit, as the real ones do.
+    """
+    module = _StandIn(AnsibleModule)
+    module.params = dict(CREDENTIALS, **params)
+    module.check_mode = check_mode
+    module.exit_json.side_effect = SystemExit(0)
+    module.fail_json.side_effect = SystemExit(1)
+    return module
+
+
+def run_main(plugin, check_mode=False, **params):
+    """Run main() of a module up to its exit_json or fail_json.
+
+    The params go through the argument spec main() declares, as AnsibleModule
+    does it: defaults and fallbacks are filled in, a missing, unknown or
+    refused parameter ends in fail_json, and check mode that main() does not
+    declare ends in a skipped exit_json. Returns the AnsibleModule stand-in
+    that main() was given.
+    """
+    module = ansible_module(check_mode=check_mode, **params)
+
+    def construct(argument_spec, *, supports_check_mode=False, **options):
+        rules = {name: options.get(name) for name in _SPEC_RULES}
+        result = ArgumentSpecValidator(argument_spec, **rules).validate(module.params)
+        module.params = result.validated_parameters
+        if result.error_messages:
+            message = result.error_messages[0]
+            if isinstance(result.errors[0], UnsupportedError):
+                message = "Unsupported parameters for module: " + message
+            module.fail_json(msg=message)
+        if check_mode and not supports_check_mode:
+            module.exit_json(skipped=True, msg="module does not support check mode")
+        return module
+
+    constructor = create_autospec(
+        types.MethodType(AnsibleModule.__init__, module), side_effect=construct
+    )
+    with patch.object(plugin, "AnsibleModule", constructor):
+        with pytest.raises(SystemExit):
+            plugin.main()
+    if module.fail_json.called:
+        # pytest shows this when the test fails
+        print("fail_json: {0}".format(module.fail_json.call_args[1]))
+    return module
+
+
+def _holds_dict(value):
+    return isinstance(value, dict) or (
+        isinstance(value, list) and any(isinstance(entry, dict) for entry in value)
+    )
+
+
+def _model_classes(value):
+    """Return the class names of the SDK models in the value of a field."""
+    entries = value if isinstance(value, list) else [value]
+    return [type(entry).__name__ for entry in entries if hasattr(entry, "__fields__")]
+
+
+def sdk_model(class_name, **fields):
+    """Return an SDK model with these fields set; build a nested model first.
+
+    The SDK models drop a keyword they do not know, also in a dict they are
+    given for a nested model, and rebuild a nested model of another class as
+    the class of the field. All three are refused here, so that a test object
+    is what the test wrote and carries no field that Pure1 data does not have.
+    """
+    cls = getattr(MODELS, class_name)
+    if cls is None:
+        raise TypeError("the SDK has no model {0}".format(class_name))
+    unknown = sorted(set(fields) - set(cls.__fields__))
+    if unknown:
+        raise TypeError(
+            "{0} has no field {1}; its fields: {2}".format(
+                class_name, ", ".join(unknown), ", ".join(cls.__fields__)
+            )
+        )
+    item = cls(**fields)
+    for name, value in fields.items():
+        kept = vars(item)[name]
+        if _holds_dict(value) and not _holds_dict(kept):
+            raise TypeError(
+                "{0}.{1}: build the nested model with sdk_model(), not from "
+                "a dict".format(class_name, name)
+            )
+        if _model_classes(value) != _model_classes(kept):
+            raise TypeError(
+                "{0}.{1} is {2} in the SDK, not {3}".format(
+                    class_name,
+                    name,
+                    " and ".join(sorted(set(_model_classes(kept)))),
+                    " and ".join(sorted(set(_model_classes(value)))),
+                )
+            )
+    return item
+
+
+def valid_response(items=(), total_item_count=None):
+    """Return the SDK answer to a call that worked: status 200, one page of items."""
+    items = list(items)
+    if total_item_count is None:
+        total_item_count = len(items)
+    page = ItemIterator(
+        None, {}, None, total_item_count, items, None, more_items_remaining=False
+    )
+    return ValidResponse(200, None, total_item_count, page, {})
+
+
+def error_response(status_code, message=None, context=None):
+    """Return the SDK answer to a refused call: a status and one error, no items."""
+    return ErrorResponse(status_code, [ApiError(context, message)], {})
+
+
+def _no_client(*args, **kwargs):
+    pytest.fail("pure1.Client() was called: ask for the pure1_client fixture")
+
+
+@pytest.fixture(autouse=True)
+def client_factory(monkeypatch):
+    """Replace pure1.Client() by a mock with its signature and return the mock.
+
+    It is in place for every test, so that none can open a connection.
+    """
+    factory = create_autospec(SDK.Client, side_effect=_no_client)
+    monkeypatch.setattr(SDK, "Client", factory)
+    return factory
+
+
+@pytest.fixture
+def pure1_client(client_factory):
+    """Return the stand-in for the SDK client; pure1.Client() gives it in this test."""
+    client = _StandIn(NEWEST.Client)
+    client._api_client = _StandIn(NEWEST.client.ApiClient)
+    # get_pure1 checks every new client with get_arrays()
+    client.get_arrays.return_value = valid_response()
+    client_factory.side_effect = None
+    client_factory.return_value = client
+    return client
+
+
+@pytest.fixture
+def no_sdk(monkeypatch):
+    """Make 'import pypureclient' fail, as on a host without py-pure-client."""
+    monkeypatch.setitem(sys.modules, "pypureclient", None)
