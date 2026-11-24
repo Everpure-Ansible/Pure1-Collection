@@ -1,0 +1,2 @@
+bugfixes:
+  - "pure1_array_tags - a tag written as a YAML mapping (``key: value``) or as a list now fails the task with a message that says how to write it, instead of being stored under a mangled key."

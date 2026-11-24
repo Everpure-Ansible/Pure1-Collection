@@ -11,6 +11,7 @@ import inspect
 import pytest
 from unittest.mock import Mock, call, patch
 
+from ansible.module_utils.common.arg_spec import ArgumentSpecValidator
 from pypureclient import ApiError, ErrorResponse, PureError, ValidResponse
 
 from plugins.modules import pure1_array_tags
@@ -1326,6 +1327,332 @@ class TestTagForm:
             call(resource_names=["foo"], keys=["Owner"]),
             call(resource_names=["foo"], keys=["Owner"]),
         ]
+        module.exit_json.assert_called_once_with(changed=True)
+
+
+# How the failure says to write a tag when the mapping does not show it
+WRITE_EACH_TAG = (
+    " is a mapping, not a text. Write each tag as 'key:value', in quotes and "
+    "with no space after the colon."
+)
+
+# An entry of tag that YAML read as a mapping or a list, and the failure
+NOT_A_TEXT = [
+    pytest.param(
+        {"key1": "value1"},
+        "Tag {'key1': 'value1'} is a mapping, not a text. Write the tag as "
+        "'key1:value1', in quotes and with no space after the colon.",
+        id="mapping",
+    ),
+    pytest.param(
+        {"url": "http://x:80/y"},
+        "Tag {'url': 'http://x:80/y'} is a mapping, not a text. Write the tag "
+        "as 'url:http://x:80/y', in quotes and with no space after the colon.",
+        id="mapping whose value holds colons",
+    ),
+    pytest.param(
+        {"key1": "value1", "key2": "value2"},
+        "Tag {'key1': 'value1', 'key2': 'value2'}" + WRITE_EACH_TAG,
+        id="mapping with two pairs",
+    ),
+    pytest.param(
+        {"key1": None},
+        "Tag {'key1': None}" + WRITE_EACH_TAG,
+        id="mapping without a value",
+    ),
+    pytest.param(
+        {"key1": ""},
+        "Tag {'key1': ''}" + WRITE_EACH_TAG,
+        id="mapping with an empty value",
+    ),
+    pytest.param(
+        {"key1": 5},
+        "Tag {'key1': 5}" + WRITE_EACH_TAG,
+        id="mapping with a number",
+    ),
+    pytest.param(
+        {"key1": {"key2": "value2"}},
+        "Tag {'key1': {'key2': 'value2'}}" + WRITE_EACH_TAG,
+        id="mapping in a mapping",
+    ),
+    pytest.param(
+        {"owner": "O'Brien"},
+        "Tag {'owner': \"O'Brien\"}" + WRITE_EACH_TAG,
+        id="mapping with a quote",
+    ),
+    pytest.param(
+        {"key1": "a\nb"},
+        "Tag {'key1': 'a\\nb'}" + WRITE_EACH_TAG,
+        id="mapping with a line break",
+    ),
+    pytest.param(
+        {"owner": "Jane Doe"},
+        "Tag {'owner': 'Jane Doe'} is a mapping, not a text. Write the tag as "
+        "'owner:Jane Doe', in quotes and with no space after the colon.",
+        id="mapping whose value holds a space",
+    ),
+    pytest.param(
+        {"key1": " value1"},
+        "Tag {'key1': ' value1'}" + WRITE_EACH_TAG,
+        id="mapping whose value begins with a space",
+    ),
+    pytest.param(
+        {"key1": "value1 "},
+        "Tag {'key1': 'value1 '}" + WRITE_EACH_TAG,
+        id="mapping whose value ends with a space",
+    ),
+    pytest.param(
+        {" key1": "value1"},
+        "Tag {' key1': 'value1'}" + WRITE_EACH_TAG,
+        id="mapping whose key begins with a space",
+    ),
+    pytest.param(
+        {"key1 ": "value1"},
+        "Tag {'key1 ': 'value1'}" + WRITE_EACH_TAG,
+        id="mapping whose key ends with a space",
+    ),
+    # written as 'a:b:c' the tag would have the key a and the value b:c
+    pytest.param(
+        {"a:b": "c"},
+        "Tag {'a:b': 'c'}" + WRITE_EACH_TAG,
+        id="mapping whose key holds a colon",
+    ),
+    pytest.param(
+        {"": "value1"},
+        "Tag {'': 'value1'}" + WRITE_EACH_TAG,
+        id="mapping with an empty key",
+    ),
+    pytest.param(
+        {"o'k": "value1"},
+        "Tag {\"o'k\": 'value1'}" + WRITE_EACH_TAG,
+        id="mapping with a quote in the key",
+    ),
+    pytest.param(
+        {"a\nb": "value1"},
+        "Tag {'a\\nb': 'value1'}" + WRITE_EACH_TAG,
+        id="mapping with a line break in the key",
+    ),
+    # a task gives every key as a text; another caller may not
+    pytest.param(
+        {5: "value1"},
+        "Tag {5: 'value1'}" + WRITE_EACH_TAG,
+        id="mapping whose key is no text",
+    ),
+    pytest.param({}, "Tag {}" + WRITE_EACH_TAG, id="empty mapping"),
+    pytest.param(
+        ["key1:value1", "key2:value2"],
+        "Tag ['key1:value1', 'key2:value2'] is a list, not a text. Write each "
+        "of its entries as an entry of tag itself.",
+        id="list",
+    ),
+    pytest.param(
+        [{"key1": "value1"}],
+        "Tag [{'key1': 'value1'}] is a list, not a text. Write each of its "
+        "entries as an entry of tag itself.",
+        id="list of a mapping",
+    ),
+    pytest.param(
+        [],
+        "Tag [] is a list, not a text. Write each of its entries as an entry "
+        "of tag itself.",
+        id="empty list",
+    ),
+]
+
+
+class TestTagType:
+    """A tag is a text: a mapping or a list fails, any other entry is made one."""
+
+    @pytest.mark.parametrize("check_mode", [False, True])
+    @pytest.mark.parametrize("state", ["present", "absent"])
+    @pytest.mark.parametrize("tag, message", NOT_A_TEXT)
+    def test_main_refuses_it_before_pure1_is_asked(
+        self, client_factory, tag, message, state, check_mode
+    ):
+        # no pure1_client: creating the client would fail the test
+        module = run_main(
+            pure1_array_tags,
+            check_mode=check_mode,
+            name="foo",
+            tag=["key2:value2", tag],
+            state=state,
+        )
+
+        client_factory.assert_not_called()
+        module.fail_json.assert_called_once_with(msg=message)
+        module.exit_json.assert_not_called()
+
+    @pytest.mark.parametrize("state", ["present", "absent"])
+    def test_mapping_is_refused_whatever_else_the_task_gives(
+        self, client_factory, state
+    ):
+        # a tag without a value and a null come first in the list
+        module = run_main(
+            pure1_array_tags,
+            name="foo",
+            tag=["key2", None, {"key1": "value1"}],
+            state=state,
+        )
+
+        client_factory.assert_not_called()
+        module.fail_json.assert_called_once_with(
+            msg="Tag {'key1': 'value1'} is a mapping, not a text. Write the tag "
+            "as 'key1:value1', in quotes and with no space after the colon."
+        )
+
+    @pytest.mark.parametrize("state", ["present", "absent"])
+    @pytest.mark.parametrize(
+        "tags, message",
+        [
+            pytest.param(
+                [{"key1": "value1"}, "key2:value2"],
+                "Tag {'key1': 'value1'} is a mapping, not a text. Write the tag "
+                "as 'key1:value1', in quotes and with no space after the colon.",
+                id="mapping first",
+            ),
+            pytest.param(
+                ["key2", {"key1": "value1"}, "key3:value3"],
+                "Tag {'key1': 'value1'} is a mapping, not a text. Write the tag "
+                "as 'key1:value1', in quotes and with no space after the colon.",
+                id="mapping in the middle",
+            ),
+            pytest.param(
+                [["key1:value1"], "key2:value2"],
+                "Tag ['key1:value1'] is a list, not a text. Write each of its "
+                "entries as an entry of tag itself.",
+                id="list first",
+            ),
+            pytest.param(
+                [["key1:value1"], {"key1": "value1"}],
+                "Tag ['key1:value1'] is a list, not a text. Write each of its "
+                "entries as an entry of tag itself.",
+                id="list before a mapping",
+            ),
+        ],
+    )
+    def test_entry_that_is_no_text_is_refused_wherever_it_stands(
+        self, client_factory, tags, message, state
+    ):
+        # the first such entry of the list is the one the failure shows
+        module = run_main(pure1_array_tags, name="foo", tag=tags, state=state)
+
+        client_factory.assert_not_called()
+        module.fail_json.assert_called_once_with(msg=message)
+        module.exit_json.assert_not_called()
+
+    @pytest.mark.parametrize("check_mode", [False, True])
+    @pytest.mark.parametrize("state", ["present", "absent"])
+    def test_mapping_stores_and_removes_nothing(self, pure1_client, state, check_mode):
+        # the key that the text of the mapping gives when its first colon
+        # splits it: nothing is stored under it and it is not removed
+        stored = [("{'key1'", "value2"), ("key1", "value2")]
+        pure1 = _Pure1(pure1_client, tags=stored)
+
+        module = run_main(
+            pure1_array_tags,
+            check_mode=check_mode,
+            name="Array1",
+            tag=[{"key1": "value1"}],
+            state=state,
+        )
+
+        module.fail_json.assert_called_once_with(
+            msg="Tag {'key1': 'value1'} is a mapping, not a text. Write the tag "
+            "as 'key1:value1', in quotes and with no space after the colon."
+        )
+        module.exit_json.assert_not_called()
+        pure1_client.get_arrays.assert_not_called()
+        assert pure1.tags == [list(tag) for tag in stored]
+
+    def test_entry_that_is_no_text_is_made_the_text_ansible_makes_of_it(
+        self, pure1_client
+    ):
+        keys = ["5", "1.5", "True", "False", "key1"]
+        _known(pure1_client)
+        pure1_client.get_arrays_tags.return_value = valid_response(
+            [_tag(key, "value1") for key in keys]
+        )
+        pure1_client.delete_arrays_tags.side_effect = [_deleted() for key in keys]
+
+        module = run_main(
+            pure1_array_tags,
+            name="foo",
+            tag=[5, 1.5, True, False, "key1"],
+            state="absent",
+        )
+
+        assert pure1_client.delete_arrays_tags.call_args_list == [
+            call(resource_names=["foo"], keys=[key]) for key in keys
+        ]
+        assert module.params["tag"] == keys
+        module.exit_json.assert_called_once_with(changed=True)
+
+    @pytest.mark.parametrize("check_mode", [False, True])
+    @pytest.mark.parametrize("tag, text", [(5, "5"), (1.5, "1.5"), (True, "True")])
+    def test_present_refuses_it_by_its_text(
+        self, client_factory, tag, text, check_mode
+    ):
+        module = run_main(
+            pure1_array_tags, check_mode=check_mode, name="foo", tag=["key2:b", tag]
+        )
+
+        client_factory.assert_not_called()
+        module.fail_json.assert_called_once_with(
+            msg="Tag '{0}' is not valid: with state present a tag has the form "
+            "key:value, and neither the key nor the value can be empty.".format(text)
+        )
+        module.exit_json.assert_not_called()
+
+    def test_null_is_what_ansible_makes_of_it_for_a_text(
+        self, client_factory, pure1_client
+    ):
+        # ansible-core refuses a null where a text is declared up to 2.18,
+        # and makes it an empty text from 2.19
+        tags = ["key1", None]
+        as_texts = ArgumentSpecValidator(
+            {"tag": {"type": "list", "elements": "str"}}
+        ).validate({"tag": tags})
+        _known(pure1_client)
+        pure1_client.get_arrays_tags.return_value = valid_response(
+            [_tag("key1", "value1")]
+        )
+        pure1_client.delete_arrays_tags.return_value = _deleted()
+
+        module = run_main(pure1_array_tags, name="foo", tag=tags, state="absent")
+
+        assert module.params["tag"] == as_texts.validated_parameters["tag"]
+        if as_texts.error_messages:
+            assert as_texts.error_messages == [
+                "Elements value for option 'tag' is of type <class 'NoneType'> "
+                "and we were unable to convert to str: 'None' is not a string "
+                "and conversion is not allowed"
+            ]
+            assert module.params["tag"] == ["key1"]
+            client_factory.assert_not_called()
+            module.fail_json.assert_called_once_with(msg=as_texts.error_messages[0])
+            module.exit_json.assert_not_called()
+        else:
+            assert module.params["tag"] == ["key1", ""]
+            pure1_client.delete_arrays_tags.assert_called_once_with(
+                resource_names=["foo"], keys=["key1"]
+            )
+            module.exit_json.assert_called_once_with(changed=True)
+
+    def test_text_with_commas_in_place_of_the_list_is_split(self, pure1_client):
+        _known(pure1_client)
+        pure1_client.get_arrays_tags.return_value = valid_response([])
+        pure1_client.put_arrays_tags.return_value = _ok()
+
+        module = run_main(pure1_array_tags, name="foo", tag="key1:value1,key2:value2")
+
+        pure1_client.put_arrays_tags.assert_called_once_with(
+            resource_names=["foo"],
+            tag_put=[
+                {"key": "key1", "value": "value1"},
+                {"key": "key2", "value": "value2"},
+            ],
+        )
+        assert module.params["tag"] == ["key1:value1", "key2:value2"]
         module.exit_json.assert_called_once_with(changed=True)
 
 
