@@ -8,12 +8,6 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
-ANSIBLE_METADATA = {
-    "metadata_version": "1.1",
-    "status": ["preview"],
-    "supported_by": "community",
-}
-
 DOCUMENTATION = r"""
 ---
 module: pure1_volume_metrics
@@ -99,10 +93,12 @@ EXAMPLES = r"""
 - name: List the metric names available for volumes
   everpure.pure1.pure1_volume_metrics:
     list_available: true
+    app_id: pure1:apikey:dssf2331sd
+    key_file: /home/user/private.pem
   register: available
 
 - name: Show available volume metric names
-  debug:
+  ansible.builtin.debug:
     msg: "{{ available['pure1_volume_metrics']['available_metrics'] }}"
 
 - name: Collect a capacity metric for all volumes
@@ -112,7 +108,7 @@ EXAMPLES = r"""
   register: usage
 
 - name: Show per-volume metric data
-  debug:
+  ansible.builtin.debug:
     msg: "{{ usage['pure1_volume_metrics']['serial_numbers'] }}"
 
 - name: Collect multiple metrics for volumes on a single array
@@ -204,6 +200,7 @@ pure1_volume_metrics:
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
+    filter_string,
     get_pure1,
     pure1_argument_spec,
 )
@@ -211,11 +208,6 @@ import time
 
 # Pure1 metrics history allows up to 32 time series (metrics x resources) per call.
 MAX_TIME_SERIES = 32
-
-
-def filter_string(value):
-    # Pure1 filters escape a backslash or a single quote in a string with a backslash.
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def api_error(response):

@@ -1,0 +1,9 @@
+bugfixes:
+  - "pure1_pods - a pod that Pure1 returns without a name or an array is left out with a warning, and a source without a name is no source, instead of a traceback."
+  - "pure1_pods, pure1_volumes - an array name with a single quote is now matched literally instead of being refused by Pure1."
+  - "pure1_pods, pure1_volumes - an error answer from Pure1 or an error raised by py-pure-client now fails the task with its message instead of a traceback."
+  - "pure1_pods, pure1_volumes - the examples are valid tasks and the return documentation describes every returned key."
+  - "pure1_volumes - a value that Pure1 does not send is null instead of a traceback, and a volume without a serial number is left out with a warning."
+  - "pure1_volumes - with ``array`` set, ``array`` of a volume in a stretched pod is the requested array instead of the first array Pure1 lists."
+minor_changes:
+  - "pure1_pods - every pod returns ``arrays``, the names of all arrays it is on, and ``stretched``."

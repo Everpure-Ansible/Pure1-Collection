@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from pypureclient import ApiError, ErrorResponse
 
+from plugins.module_utils.pure1 import filter_string
 from plugins.modules import pure1_volume_metrics
 from plugins.modules.pure1_volume_metrics import (
     generate_metrics_dict,
@@ -246,6 +247,9 @@ class TestVolumeSelection:
         client.get_volumes.assert_called_once_with(
             filter="arrays.name='my\\'arr\\\\ay'"
         )
+
+    def test_filter_string_is_the_one_of_module_utils(self):
+        assert pure1_volume_metrics.filter_string is filter_string
 
     def test_volumes_name_filter_is_applied(self, pure1_client):
         client = _client(
@@ -756,3 +760,10 @@ class TestMain:
 
         result = module.exit_json.call_args[1]["pure1_volume_metrics"]
         assert [metric["name"] for metric in result["available_metrics"]] == CATALOG
+
+
+class TestDocumentation:
+    """The documentation strings of the module."""
+
+    def test_module_has_no_ansible_metadata(self):
+        assert not hasattr(pure1_volume_metrics, "ANSIBLE_METADATA")
