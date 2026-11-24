@@ -1,0 +1,10 @@
+bugfixes:
+  - "pure1_drives - a named ``array`` without drives now returns ``pure1_drives`` with empty ``drives`` beside the warning instead of no result key."
+  - "pure1_drives - an error answer for a named ``array`` now fails the task instead of ending with the warning that the array has no drives."
+  - "pure1_drives, pure1_nics, pure1_ports, pure1_network_interfaces - an error answer from Pure1 or an error raised by py-pure-client now fails the task with its message instead of a traceback."
+  - "pure1_drives, pure1_nics, pure1_ports, pure1_network_interfaces - an array name with a single quote is now matched literally instead of being refused by Pure1."
+  - "pure1_drives, pure1_nics, pure1_ports, pure1_network_interfaces - an object that Pure1 returns without a name or an array is left out with a warning, and a missing optional value is null, instead of a traceback."
+  - "pure1_drives, pure1_nics, pure1_ports, pure1_network_interfaces - the examples are valid tasks and the return documentation describes the result."
+  - "pure1_network_interfaces - the spelling of the failure message for an array without interfaces is corrected."
+minor_changes:
+  - "pure1_nics - every interface has the new key ``speed_bps``, the speed in bits per second as Pure1 reports it, null when it reports none."

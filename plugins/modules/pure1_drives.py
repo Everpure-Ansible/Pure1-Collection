@@ -8,12 +8,6 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
-ANSIBLE_METADATA = {
-    "metadata_version": "1.1",
-    "status": ["preview"],
-    "supported_by": "community",
-}
-
 DOCUMENTATION = r"""
 ---
 module: pure1_drives
@@ -24,7 +18,10 @@ description:
 options:
   array:
     description:
-      - Filter to provide only drives for a specifically named array or blade
+      - Filter to provide only drives for a specifically named FlashArray or
+        Cloud Block Store array.
+      - Pure1 reports no drives for a FlashBlade, and none for a name it does
+        not know. The result is then empty and the module gives a warning.
     type: str
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
@@ -33,18 +30,20 @@ extends_documentation_fragment:
 """
 
 EXAMPLES = r"""
-- name: collect all drives information
+- name: Collect all drives information
   everpure.pure1.pure1_drives:
-    register: pure1_drives
+    app_id: pure1:apikey:dssf2331sd
+    key_file: /home/user/private.pem
+  register: pure1_drives
 
-- name: collect only drives information for array X
+- name: Collect only drives information for array X
   everpure.pure1.pure1_drives:
     array: X
-    register: pure1_drives
+  register: pure1_drives
 
-- name: show drives information
-  debug:
-    msg: "{{ pure1_info['pure1_drives']['drives'] }}"
+- name: Show drives information
+  ansible.builtin.debug:
+    msg: "{{ pure1_drives['pure1_drives']['drives'] }}"
 """
 
 RETURN = r"""
@@ -52,37 +51,81 @@ pure1_drives:
   description: Returns array drives information collected from Pure1
   returned: always
   type: dict
+  contains:
+    drives:
+      description:
+        - The drives of each array, as a dictionary keyed by array name.
+        - The value for an array is a list with one dictionary per drive. That
+          dictionary has one key, the drive name, and its value is a dictionary
+          with the keys listed here.
+        - A key is null when Pure1 reports no value for it.
+        - Empty when Pure1 reports no drives.
+      type: dict
+      contains:
+        capacity:
+          description: Physical storage capacity of the drive in bytes.
+          type: int
+        protocol:
+          description: Storage protocol of the drive, for example C(NVMe) or C(SAS).
+          type: str
+        status:
+          description: Current status of the drive, for example C(healthy) or C(failed).
+          type: str
+        type:
+          description: Type of the drive, for example C(SSD), C(NVRAM) or C(cache).
+          type: str
+  sample:
+    drives:
+      array1:
+        - CH0.BAY1:
+            capacity: 1099511627776
+            protocol: NVMe
+            status: healthy
+            type: SSD
+        - CH0.NVB1:
+            capacity: 4294967296
+            protocol: NVMe
+            status: healthy
+            type: NVRAM
 """
 
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
+    filter_string,
     get_pure1,
     pure1_argument_spec,
+    pure1_items,
 )
 
 
 def generate_drives_dict(module, pure_1):
     drives_info = {}
     if module.params["array"]:
-        res = pure_1.get_drives(filter="arrays.name='" + module.params["array"] + "'")
-        if res.status_code == 200 and res.total_item_count != 0:
-            drives = list(res.items)
-        else:
+        array_filter = "arrays.name=" + filter_string(module.params["array"])
+        drives = pure1_items(
+            module, "get_drives", lambda: pure_1.get_drives(filter=array_filter)
+        )
+        if not drives:
             module.warn(
                 "No drives information available for array {0}".format(
                     module.params["array"]
                 )
             )
-            module.exit_json(changed=False)
     else:
-        drives = list(pure_1.get_drives().items)
+
+        def all_drives():
+            return pure_1.get_drives()
+
+        drives = pure1_items(module, "get_drives", all_drives)
+    left_out = 0
     for drive in range(0, len(drives)):
-        array = drives[drive].arrays[0].name
-        drives_info[array] = []
-    for drive in range(0, len(drives)):
-        array = drives[drive].arrays[0].name
-        drive_name = drives[drive].name
+        arrays = getattr(drives[drive], "arrays", None)
+        array = getattr(arrays[0], "name", None) if arrays else None
+        drive_name = getattr(drives[drive], "name", None)
+        if array is None or drive_name is None:
+            left_out += 1
+            continue
         drive_details = {
             drive_name: {
                 "capacity": getattr(drives[drive], "capacity", None),
@@ -91,7 +134,12 @@ def generate_drives_dict(module, pure_1):
                 "type": getattr(drives[drive], "type", None),
             }
         }
-        drives_info[array].append(drive_details)
+        drives_info.setdefault(array, []).append(drive_details)
+    if left_out:
+        module.warn(
+            "Drives that Pure1 returned without a name or without an array "
+            "are left out of the result: {0}".format(left_out)
+        )
     return drives_info
 
 

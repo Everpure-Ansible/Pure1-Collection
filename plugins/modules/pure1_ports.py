@@ -8,12 +8,6 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
-ANSIBLE_METADATA = {
-    "metadata_version": "1.1",
-    "status": ["preview"],
-    "supported_by": "community",
-}
-
 DOCUMENTATION = r"""
 ---
 module: pure1_ports
@@ -33,18 +27,20 @@ extends_documentation_fragment:
 """
 
 EXAMPLES = r"""
-- name: collect all ports information
+- name: Collect all ports information
   everpure.pure1.pure1_ports:
-    register: pure1_ports
+    app_id: pure1:apikey:dssf2331sd
+    key_file: /home/user/private.pem
+  register: pure1_ports
 
-- name: collect only ports information for array X
+- name: Collect only ports information for array X
   everpure.pure1.pure1_ports:
     array: X
-    register: pure1_ports
+  register: pure1_ports
 
-- name: show ports information
-  debug:
-    msg: "{{ pure1_info['pure1_ports']['ports'] }}"
+- name: Show ports information
+  ansible.builtin.debug:
+    msg: "{{ pure1_ports['pure1_ports']['ports'] }}"
 """
 
 RETURN = r"""
@@ -52,32 +48,79 @@ pure1_ports:
   description: Returns the ports information collected from Pure1
   returned: always
   type: dict
+  contains:
+    ports:
+      description:
+        - The ports of each array, as a dictionary keyed by array name.
+        - The value for an array is a list with one dictionary per port. That
+          dictionary has one key, the port name, and its value is a dictionary
+          with the keys listed here.
+        - Empty when Pure1 reports no ports.
+      type: dict
+      contains:
+        iqn:
+          description: iSCSI Qualified Name of an iSCSI port, null for any other port.
+          type: str
+        nqn:
+          description: NVMe Qualified Name of an NVMe-oF port, null for any other port.
+          type: str
+        wwn:
+          description: World Wide Name of a Fibre Channel port, null for any other port.
+          type: str
+        portal:
+          description: IP address and port number of an iSCSI or NVMe-oF port on Ethernet, null for a Fibre Channel port.
+          type: str
+        failover:
+          description: Name of the port that this port has failed over to, null when it has not failed over.
+          type: str
+  sample:
+    ports:
+      array1:
+        - CT0.ETH4:
+            iqn: "iqn.2010-06.com.purestorage:flasharray.1a2b3c4d5e6f7a8b"
+            nqn: null
+            wwn: null
+            portal: "192.0.2.20:3260"
+            failover: null
+        - CT0.FC0:
+            iqn: null
+            nqn: null
+            wwn: "52:4A:93:70:00:00:00:00"
+            portal: null
+            failover: null
 """
 
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
+    filter_string,
     get_pure1,
     pure1_argument_spec,
+    pure1_items,
 )
 
 
 def generate_ports_dict(module, pure_1):
     ports_info = {}
     if module.params["array"]:
-        ports = list(
-            pure_1.get_ports(
-                filter="arrays.name='" + module.params["array"] + "'"
-            ).items
+        array_filter = "arrays.name=" + filter_string(module.params["array"])
+        ports = pure1_items(
+            module, "get_ports", lambda: pure_1.get_ports(filter=array_filter)
         )
     else:
-        ports = list(pure_1.get_ports().items)
+
+        def all_ports():
+            return pure_1.get_ports()
+
+        ports = pure1_items(module, "get_ports", all_ports)
+    left_out = 0
     for port in range(0, len(ports)):
-        array = ports[port].arrays[0].name
-        ports_info[array] = []
-    for port in range(0, len(ports)):
-        array = ports[port].arrays[0].name
-        port_name = ports[port].name
+        arrays = getattr(ports[port], "arrays", None)
+        array = getattr(arrays[0], "name", None) if arrays else None
+        port_name = getattr(ports[port], "name", None)
+        if array is None or port_name is None:
+            left_out += 1
+            continue
         port_details = {
             port_name: {
                 "iqn": getattr(ports[port], "iqn", None),
@@ -87,7 +130,12 @@ def generate_ports_dict(module, pure_1):
                 "failover": getattr(ports[port], "failover", None),
             }
         }
-        ports_info[array].append(port_details)
+        ports_info.setdefault(array, []).append(port_details)
+    if left_out:
+        module.warn(
+            "Ports that Pure1 returned without a name or without an array "
+            "are left out of the result: {0}".format(left_out)
+        )
     return ports_info
 
 
