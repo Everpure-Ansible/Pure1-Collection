@@ -7,7 +7,9 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
+import ast
 import datetime
+import inspect
 import json
 import re
 import time
@@ -313,6 +315,47 @@ class TestGenerateSubscriptionsDict:
             }
         }
 
+    def test_subscription_without_a_name_is_left_out(self, pure1_client):
+        module = ansible_module()
+        pure1_client.get_subscriptions.return_value = valid_response(
+            [
+                sdk_model("Subscription", service="Evergreen//One"),
+                self._subscription(),
+                sdk_model("Subscription", status="active"),
+            ]
+        )
+
+        result = generate_subscriptions_dict(pure1_client, module)
+
+        assert result == {
+            "sub1": {
+                "start_date": "2021-01-01 00:00:00 UTC",
+                "expiration_date": "2021-01-01 00:00:00 UTC",
+                "service": "Evergreen//One",
+                "status": "active",
+                "org_name": None,
+                "partner_name": None,
+                "subscription_term": None,
+            }
+        }
+        module.warn.assert_called_once_with(
+            "Subscriptions without a name were left out of the "
+            "subscriptions subset: 2."
+        )
+
+    def test_subscription_with_an_empty_name_is_reported(self, pure1_client):
+        module = ansible_module()
+        pure1_client.get_subscriptions.return_value = valid_response(
+            [sdk_model("Subscription", name="", status="active")]
+        )
+
+        result = generate_subscriptions_dict(pure1_client, module)
+
+        # an empty string is a name that Pure1 sent: the object is reported
+        assert list(result) == [""]
+        assert result[""]["status"] == "active"
+        module.warn.assert_not_called()
+
     def test_empty_subscriptions_returns_empty_dict(self, pure1_client):
         pure1_client.get_subscriptions.return_value = valid_response()
 
@@ -527,6 +570,52 @@ class TestGenerateContractDict:
         assert result["foo"]["contract_state"] == "Expired"
         assert result["foo"]["contract_found"] is True
         assert result["bar"] == {"contract_state": "Expired", "contract_found": False}
+
+    def _client_with_unnamed_arrays(self, client):
+        client.get_arrays.return_value = valid_response(
+            [
+                sdk_model("Array", os="Purity//FA"),
+                sdk_model("Array", name="foo"),
+                sdk_model("Array", model="FA-X70R4"),
+            ]
+        )
+        client.get_arrays_support_contracts.return_value = valid_response()
+        return client
+
+    def test_array_without_a_name_is_left_out(self, pure1_client):
+        module = ansible_module()
+        client = self._client_with_unnamed_arrays(pure1_client)
+
+        result = generate_contract_dict(client, module)
+
+        assert result == {"foo": {"contract_state": "Expired", "contract_found": False}}
+        # no contract is asked for without a name to ask by
+        client.get_arrays_support_contracts.assert_called_once_with(
+            filter="resource.name='foo'"
+        )
+        module.warn.assert_called_once_with(
+            "Arrays without a name were left out of the contracts subset: 2."
+        )
+
+    def test_array_without_a_name_is_left_out_without_a_module(self, pure1_client):
+        client = self._client_with_unnamed_arrays(pure1_client)
+
+        result = generate_contract_dict(client)
+
+        assert result == {"foo": {"contract_state": "Expired", "contract_found": False}}
+
+    def test_array_with_an_empty_name_is_reported(self, pure1_client):
+        module = ansible_module()
+        pure1_client.get_arrays.return_value = valid_response(
+            [sdk_model("Array", name="")]
+        )
+        pure1_client.get_arrays_support_contracts.return_value = valid_response()
+
+        result = generate_contract_dict(pure1_client, module)
+
+        # an empty string is a name that Pure1 sent: the object is reported
+        assert result == {"": {"contract_state": "Expired", "contract_found": False}}
+        module.warn.assert_not_called()
 
     def test_error_answer_for_an_array_is_raised(self, pure1_client):
         pure1_client.get_arrays.return_value = valid_response(
@@ -941,6 +1030,75 @@ class TestGenerateEsgDict:
         ]
         module.warn.assert_not_called()
 
+    def test_appliance_without_a_name_is_left_out(self, pure1_client):
+        module, result = self._result(
+            pure1_client,
+            [
+                sdk_model("SustainabilityArray", reporting_status="not_enough_data"),
+                sdk_model("SustainabilityArray", name="fa1"),
+                sdk_model(
+                    "SustainabilityArray",
+                    reporting_status="assessment_ready",
+                    assessment=sdk_model(
+                        "SustainabilityAssessment", assessment_level="good"
+                    ),
+                ),
+            ],
+        )
+
+        assert result == {
+            "fa1": {
+                "insights": [],
+                "location": {},
+                "assessment": {},
+                "reporting_status": None,
+            }
+        }
+        module.warn.assert_called_once_with(
+            "Arrays without a name were left out of the environmental subset: 2."
+        )
+
+    def test_appliance_with_an_empty_name_is_reported(self, pure1_client):
+        module, result = self._result(
+            pure1_client,
+            [
+                sdk_model(
+                    "SustainabilityArray", name="", reporting_status="not_enough_data"
+                )
+            ],
+        )
+
+        # an empty string is a name that Pure1 sent: the object is reported
+        assert result == {
+            "": {
+                "insights": [],
+                "location": {},
+                "assessment": {},
+                "reporting_status": "not_enough_data",
+            }
+        }
+        module.warn.assert_not_called()
+
+    def test_unnamed_appliances_and_insights_have_a_warning_each(self, pure1_client):
+        module, result = self._result(
+            pure1_client,
+            [
+                sdk_model("SustainabilityArray", reporting_status="not_enough_data"),
+                sdk_model("SustainabilityArray", name="fa1"),
+            ],
+            [sdk_model("SustainabilityInsightArray", type="no_resource")],
+        )
+
+        assert list(result) == ["fa1"]
+        arrays, insights = [call[0][0] for call in module.warn.call_args_list]
+        assert arrays == (
+            "Arrays without a name were left out of the environmental subset: 1."
+        )
+        assert insights == (
+            "Insights without an array name were left out of the "
+            "environmental subset: 1."
+        )
+
     @pytest.mark.parametrize(
         "method",
         [
@@ -1183,6 +1341,95 @@ class TestGenerateSubscriptionLicensesDict:
 
         json.dumps(result)
 
+    def test_license_without_a_name_is_left_out(self, pure1_client):
+        module = ansible_module()
+        pure1_client.get_subscription_licenses.return_value = valid_response(
+            [
+                sdk_model("SubscriptionLicense", service_tier="//Block - Performance"),
+                sdk_model("SubscriptionLicense", name="lic1"),
+                sdk_model("SubscriptionLicense", start_date=JAN_2021_MS),
+            ]
+        )
+
+        result = generate_subscription_licenses_dict(pure1_client, module)
+
+        assert list(result) == ["lic1"]
+        assert set(result["lic1"]) == LICENSE_KEYS
+        module.warn.assert_called_once_with(
+            "Licenses without a name were left out of the subscriptions subset: 2."
+        )
+
+    def test_resource_without_a_name_is_left_out_of_its_license(self, pure1_client):
+        module = ansible_module()
+        pure1_client.get_subscription_licenses.return_value = valid_response(
+            [
+                sdk_model(
+                    "SubscriptionLicense",
+                    name="lic1",
+                    resources=[
+                        sdk_model("LicenseResourceReference", resource_type="arrays"),
+                        sdk_model("LicenseResourceReference", name="res1"),
+                    ],
+                ),
+                sdk_model(
+                    "SubscriptionLicense",
+                    name="lic2",
+                    resources=[
+                        sdk_model("LicenseResourceReference", fqdn="array2.example.com")
+                    ],
+                ),
+            ]
+        )
+
+        result = generate_subscription_licenses_dict(pure1_client, module)
+
+        assert {name: entry["resources"] for name, entry in result.items()} == {
+            "lic1": {
+                "res1": {
+                    "resource_type": None,
+                    "fqdn": None,
+                    "activation_time": None,
+                    "usage": {"data": None, "unit": None, "metric": None},
+                }
+            },
+            "lic2": {},
+        }
+        # one warning for the subset, whatever the number of licenses
+        module.warn.assert_called_once_with(
+            "License resources without a name were left out of the "
+            "subscriptions subset: 2."
+        )
+
+    def test_license_and_resource_with_an_empty_name_are_reported(self, pure1_client):
+        module = ansible_module()
+        pure1_client.get_subscription_licenses.return_value = valid_response(
+            [
+                sdk_model(
+                    "SubscriptionLicense",
+                    name="",
+                    resources=[
+                        sdk_model(
+                            "LicenseResourceReference", name="", resource_type="arrays"
+                        )
+                    ],
+                )
+            ]
+        )
+
+        result = generate_subscription_licenses_dict(pure1_client, module)
+
+        # an empty string is a name that Pure1 sent: the object is reported
+        assert list(result) == [""]
+        assert result[""]["resources"] == {
+            "": {
+                "resource_type": "arrays",
+                "fqdn": None,
+                "activation_time": None,
+                "usage": {"data": None, "unit": None, "metric": None},
+            }
+        }
+        module.warn.assert_not_called()
+
     def test_empty_licenses_returns_empty_dict(self, pure1_client):
         pure1_client.get_subscription_licenses.return_value = valid_response()
 
@@ -1385,6 +1632,38 @@ class TestGenerateInvoicesDict:
         assert line["tax_percentage"] == 0
         assert line["tax_amount"] == 0
         assert line["tax_exemption_statement"] == "Exempt"
+
+    def test_invoice_without_a_number_is_left_out(self, pure1_client):
+        module = ansible_module()
+        pure1_client.get_invoices.return_value = valid_response(
+            [
+                sdk_model("Invoice", status="open"),
+                self._invoice(),
+                sdk_model("Invoice", lines=[self._line()]),
+            ]
+        )
+
+        result = generate_invoices_dict(module, pure1_client)
+
+        assert list(result) == ["INV-001"]
+        assert result["INV-001"]["status"] == "paid"
+        assert len(result["INV-001"]["lines"]) == 1
+        module.warn.assert_called_once_with(
+            "Invoices without a number were left out of the invoices subset: 2."
+        )
+
+    def test_invoice_with_an_empty_number_is_reported(self, pure1_client):
+        module = ansible_module()
+        pure1_client.get_invoices.return_value = valid_response(
+            [sdk_model("Invoice", id="", status="open")]
+        )
+
+        result = generate_invoices_dict(module, pure1_client)
+
+        # an empty string is a number that Pure1 sent: the invoice is reported
+        assert list(result) == [""]
+        assert result[""]["status"] == "open"
+        module.warn.assert_not_called()
 
     def test_no_invoices_returns_empty_dict(self, pure1_client):
         pure1_client.get_invoices.return_value = valid_response()
@@ -1635,6 +1914,128 @@ class TestGenerateAppliancesDict:
         assert result == {"FlashArray": {}, "FlashBlade": {}, "ObjectEngine": {}}
         module.warn.assert_called_once_with("Unknown operating system detected: None.")
         client.get_arrays_tags.assert_not_called()
+
+    def test_array_without_a_name_is_left_out_before_any_call(self, pure1_client):
+        module = ansible_module()
+        client = _appliances_client(
+            pure1_client,
+            [
+                sdk_model("Array", os="Purity//FA", version="6.5.0"),
+                sdk_model("Array", os="Purity//FB"),
+                sdk_model("Array", os="Elasticity"),
+                # without a name the operating system is not looked at
+                sdk_model("Array", model="FA-X70R4"),
+                _array("fa1", "Purity//FA"),
+            ],
+        )
+
+        result = generate_appliances_dict(module, client)
+
+        assert result == {
+            "FlashArray": {
+                "fa1": {
+                    "os_version": "6.5.0",
+                    "model": "FA-X70R4",
+                    "fqdn": "fa1.example.com",
+                    "tags": [],
+                }
+            },
+            "FlashBlade": {},
+            "ObjectEngine": {},
+        }
+        # tags and metrics are asked for by array name
+        client.get_arrays_tags.assert_called_once_with(resource_names=["fa1"])
+        calls = client.get_metrics_history.call_args_list
+        assert [call[1]["resource_names"] for call in calls] == [["fa1"]] * 7
+        module.warn.assert_called_once_with(
+            "Arrays without a name were left out of the appliances subset: 4."
+        )
+
+    def test_tag_without_a_key_is_left_out(self, pure1_client):
+        module = ansible_module()
+        client = _appliances_client(
+            pure1_client,
+            [
+                _array("fa1", "Purity//FA"),
+                _array("fb1", "Purity//FB"),
+                _array("oe1", "Elasticity"),
+            ],
+            tags={
+                "fa1": [
+                    sdk_model("Tag", value="lab"),
+                    sdk_model("Tag", key="site", value="lab"),
+                    sdk_model("Tag", value="ops"),
+                ],
+                "fb1": [sdk_model("Tag", namespace="pure1")],
+                "oe1": [
+                    sdk_model("Tag", key="owner", value="ops"),
+                    sdk_model("Tag", tag_organization_id=42),
+                ],
+            },
+        )
+
+        result = generate_appliances_dict(module, client)
+
+        assert result["FlashArray"]["fa1"]["tags"] == [
+            {"key": "site", "value": "lab", "org_id": None, "namespace": None}
+        ]
+        assert result["FlashBlade"]["fb1"]["tags"] == []
+        assert result["ObjectEngine"]["oe1"]["tags"] == [
+            {"key": "owner", "value": "ops", "org_id": None, "namespace": None}
+        ]
+        # one warning for the subset, whatever the number of arrays
+        module.warn.assert_called_once_with(
+            "Tags without a key were left out of the appliances subset: 4."
+        )
+
+    def test_tag_without_a_value(self, pure1_client):
+        module = ansible_module()
+        client = _appliances_client(
+            pure1_client,
+            [_array("fa1", "Purity//FA")],
+            tags={"fa1": [sdk_model("Tag", key="site")]},
+        )
+
+        result = generate_appliances_dict(module, client)
+
+        assert result["FlashArray"]["fa1"]["tags"] == [
+            {"key": "site", "value": None, "org_id": None, "namespace": None}
+        ]
+        module.warn.assert_not_called()
+
+    def test_array_with_an_empty_name_is_reported(self, pure1_client):
+        module = ansible_module()
+        client = _appliances_client(
+            pure1_client, [sdk_model("Array", name="", os="Purity//FB")]
+        )
+
+        result = generate_appliances_dict(module, client)
+
+        # an empty string is a name that Pure1 sent: the object is reported
+        assert result == {
+            "FlashArray": {},
+            "FlashBlade": {
+                "": {"os_version": None, "model": None, "fqdn": "", "tags": []}
+            },
+            "ObjectEngine": {},
+        }
+        module.warn.assert_not_called()
+
+    def test_tag_with_an_empty_key_is_reported(self, pure1_client):
+        module = ansible_module()
+        client = _appliances_client(
+            pure1_client,
+            [_array("fa1", "Purity//FA")],
+            tags={"fa1": [sdk_model("Tag", key="", value="lab")]},
+        )
+
+        result = generate_appliances_dict(module, client)
+
+        # an empty string is a key that Pure1 sent: the tag is reported
+        assert result["FlashArray"]["fa1"]["tags"] == [
+            {"key": "", "value": "lab", "org_id": None, "namespace": None}
+        ]
+        module.warn.assert_not_called()
 
     def test_flasharray_metrics(self, pure1_client):
         module = ansible_module()
@@ -2370,6 +2771,561 @@ class TestMain:
         module.exit_json.assert_not_called()
 
 
+# The SDK model classes whose fields the module reads
+MODEL_CLASSES = [
+    "Array",
+    "Tag",
+    "MetricHistory",
+    "SupportContract",
+    "Subscription",
+    "SubscriptionLicense",
+    "LicenseResourceReference",
+    "CurrentMetric",
+    "MarketplacePartner",
+    "BaseAddress",
+    "SubscriptionLicensePreRatio",
+    "FixedReference",
+    "FixedReferenceFqdn",
+    "SustainabilityArray",
+    "InstallAddress",
+    "Geolocation",
+    "SustainabilityAssessment",
+    "SustainabilityInsightArray",
+    "Invoice",
+    "InvoiceLine",
+    "InvoiceLineComponent",
+    "Tax",
+]
+
+# What each subset warns of for the answers of TestObjectWithoutAnyField
+EMPTY_OBJECT_WARNINGS = {
+    "minimum": [],
+    "appliances": [
+        "Arrays without a name were left out of the appliances subset: 1.",
+        "Tags without a key were left out of the appliances subset: 4.",
+    ],
+    "subscriptions": [
+        "Subscriptions without a name were left out of the subscriptions subset: 1.",
+        "Licenses without a name were left out of the subscriptions subset: 1.",
+        "License resources without a name were left out of the subscriptions subset: 2.",
+    ],
+    "contracts": ["Arrays without a name were left out of the contracts subset: 1."],
+    "environmental": [
+        "Arrays without a name were left out of the environmental subset: 1.",
+        "Insights without an array name were left out of the environmental subset: 2.",
+    ],
+    "invoices": ["Invoices without a number were left out of the invoices subset: 1."],
+}
+
+
+class TestObjectWithoutAnyField:
+    """Pure1 returns an object without any of its fields among complete ones.
+
+    main() collects each subset twice: from complete objects, and from the
+    same objects with an empty one of every class the subset reads among
+    them. The second result is the first plus the entries of the objects
+    named hollow, which have a name and hold the empty nested objects, and
+    the warnings say what was left out.
+    """
+
+    def _arrays(self, client, arrays):
+        def get_arrays(**kwargs):
+            # the first call is the check of get_pure1, for the count alone
+            if kwargs == {"limit": 0}:
+                return valid_response(total_item_count=len(arrays))
+            return valid_response(arrays)
+
+        client.get_arrays.side_effect = get_arrays
+
+    def _minimum(self, client, empty):
+        arrays = [_array("fa1", "Purity//FA"), _array("fb1", "Purity//FB")]
+        if empty:
+            arrays.insert(0, sdk_model("Array"))
+        self._arrays(client, arrays)
+        for method in (
+            "get_volumes",
+            "get_volume_snapshots",
+            "get_file_systems",
+            "get_file_system_snapshots",
+            "get_buckets",
+            "get_directories",
+            "get_pods",
+            "get_object_store_accounts",
+        ):
+            getattr(client, method).return_value = valid_response(total_item_count=3)
+        return {}
+
+    def _appliances(self, client, empty):
+        arrays = [
+            _array("fa1", "Purity//FA"),
+            _array("fb1", "Purity//FB"),
+            _array("oe1", "Elasticity"),
+        ]
+        tags = {
+            name: [
+                sdk_model(
+                    "Tag",
+                    key="site",
+                    value="lab",
+                    namespace="pure1",
+                    tag_organization_id=42,
+                )
+            ]
+            for name in ("fa1", "fb1", "oe1")
+        }
+        if empty:
+            arrays.insert(0, sdk_model("Array"))
+            arrays.append(sdk_model("Array", name="hollow1", os="Purity//FA"))
+            tags["hollow1"] = []
+            for tags_of_array in tags.values():
+                tags_of_array.insert(0, sdk_model("Tag"))
+        self._arrays(client, arrays)
+
+        def arrays_tags(resource_names):
+            return valid_response(tags[resource_names[0]])
+
+        def metrics_history(names, resource_names, **kwargs):
+            series = sdk_model(
+                "MetricHistory",
+                name=names[0],
+                data=_points(*FLASHARRAY_METRICS[names[0]]),
+            )
+            if resource_names == ["hollow1"]:
+                # the module reads the first series of an answer
+                return valid_response([sdk_model("MetricHistory"), series])
+            return valid_response([series])
+
+        client.get_arrays_tags.side_effect = arrays_tags
+        client.get_metrics_history.side_effect = metrics_history
+        return {
+            ("appliances", "FlashArray", "hollow1"): {
+                "os_version": None,
+                "model": None,
+                "fqdn": "",
+                "tags": [],
+            }
+        }
+
+    def _subscriptions(self, client, empty):
+        subscriptions = [
+            TestGenerateSubscriptionsDict()._subscription(
+                organization=sdk_model("FixedReference", id="org-1", name="ACME"),
+                partner_name="PartnerCo",
+                subscription_term=36,
+            )
+        ]
+        licenses = [
+            TestGenerateSubscriptionLicensesDict()._license(
+                site_address=sdk_model("BaseAddress", city="Example City"),
+                pre_ratio=sdk_model("SubscriptionLicensePreRatio", data=3.45, unit=""),
+            )
+        ]
+        if empty:
+            subscriptions.insert(0, sdk_model("Subscription"))
+            subscriptions.append(
+                sdk_model(
+                    "Subscription",
+                    name="hollow1",
+                    organization=sdk_model("FixedReference"),
+                )
+            )
+            licenses[0].resources.insert(0, sdk_model("LicenseResourceReference"))
+            licenses.insert(0, sdk_model("SubscriptionLicense"))
+            licenses.append(
+                sdk_model(
+                    "SubscriptionLicense",
+                    name="hollow1",
+                    marketplace_partner=sdk_model("MarketplacePartner"),
+                    site_address=sdk_model("BaseAddress"),
+                    pre_ratio=sdk_model("SubscriptionLicensePreRatio"),
+                    subscription=sdk_model("FixedReference"),
+                    average_on_demand=sdk_model("CurrentMetric"),
+                    reservation=sdk_model(
+                        "CurrentMetric", metric=sdk_model("FixedReference")
+                    ),
+                    usage=sdk_model("CurrentMetric"),
+                    quarter_on_demand=sdk_model("CurrentMetric"),
+                    resources=[
+                        sdk_model("LicenseResourceReference"),
+                        sdk_model(
+                            "LicenseResourceReference",
+                            name="hollow2",
+                            usage=sdk_model("CurrentMetric"),
+                        ),
+                    ],
+                )
+            )
+        client.get_subscriptions.return_value = valid_response(subscriptions)
+        client.get_subscription_licenses.return_value = valid_response(licenses)
+        no_metric = {"data": None, "unit": None, "metric": None}
+        return {
+            ("subscriptions", "hollow1"): {
+                "start_date": None,
+                "expiration_date": None,
+                "service": None,
+                "status": None,
+                "org_name": None,
+                "partner_name": None,
+                "subscription_term": None,
+            },
+            ("subscription_licenses", "hollow1"): {
+                "start_date": None,
+                "expiration_date": None,
+                "last_updated": None,
+                "marketplace_partner": None,
+                "service_tier": None,
+                "location": None,
+                "pre_ratio": None,
+                "energy_usage": None,
+                "subscription": None,
+                "average_on_demand": no_metric,
+                "reservation": no_metric,
+                "usage": no_metric,
+                "quarter_on_demand": no_metric,
+                "resources": {
+                    "hollow2": {
+                        "resource_type": None,
+                        "fqdn": None,
+                        "activation_time": None,
+                        "usage": no_metric,
+                    }
+                },
+            },
+        }
+
+    def _contracts(self, client, empty):
+        arrays = [_array("fa1", "Purity//FA"), _array("fb1", "Purity//FB")]
+        if empty:
+            arrays.insert(0, sdk_model("Array"))
+            arrays.append(sdk_model("Array", name="hollow1"))
+        self._arrays(client, arrays)
+
+        def support_contracts(**kwargs):
+            contracts = [
+                sdk_model(
+                    "SupportContract", start_date=JAN_2021_MS, end_date=FEB_2021_MS
+                )
+            ]
+            if kwargs == {"filter": "resource.name='hollow1'"}:
+                # the module reads the first record of an answer
+                contracts.insert(0, sdk_model("SupportContract"))
+            return valid_response(contracts)
+
+        client.get_arrays_support_contracts.side_effect = support_contracts
+        return {
+            ("contracts", "hollow1"): {
+                "contract_start": None,
+                "contract_end": None,
+                "contract_state": "Expired",
+                "contract_found": True,
+            }
+        }
+
+    def _environmental(self, client, empty):
+        appliances = [
+            sdk_model(
+                "SustainabilityArray",
+                name="fa1",
+                reporting_status="assessment_ready",
+                install_address=sdk_model(
+                    "InstallAddress",
+                    geolocation=sdk_model(
+                        "Geolocation", latitude=37.4, longitude=-122.1
+                    ),
+                    street_address="1 Main Street",
+                    updated=JAN_2021_MS,
+                ),
+                assessment=sdk_model(
+                    "SustainabilityAssessment",
+                    assessment_level="good",
+                    power_average=512.5,
+                    interval_start=JAN_2021_MS,
+                    interval_end=FEB_2021_MS,
+                ),
+            )
+        ]
+        insights = [
+            sdk_model(
+                "SustainabilityInsightArray",
+                resource=sdk_model(
+                    "FixedReferenceFqdn", name="fa1", fqdn="fa1.example.com"
+                ),
+                type="high_power_consumption",
+                severity="medium",
+                additional_data={"power": 512.5},
+            )
+        ]
+        if empty:
+            appliances.insert(0, sdk_model("SustainabilityArray"))
+            appliances.append(
+                sdk_model(
+                    "SustainabilityArray",
+                    name="hollow1",
+                    reporting_status="assessment_ready",
+                    install_address=sdk_model("InstallAddress"),
+                    assessment=sdk_model("SustainabilityAssessment"),
+                )
+            )
+            appliances.append(
+                sdk_model(
+                    "SustainabilityArray",
+                    name="hollow2",
+                    install_address=sdk_model(
+                        "InstallAddress", geolocation=sdk_model("Geolocation")
+                    ),
+                )
+            )
+            insights.insert(0, sdk_model("SustainabilityInsightArray"))
+            insights.append(
+                sdk_model(
+                    "SustainabilityInsightArray",
+                    resource=sdk_model("FixedReferenceFqdn"),
+                )
+            )
+        client.get_assessment_sustainability_arrays.return_value = valid_response(
+            appliances
+        )
+        client.get_assessment_sustainability_insights_arrays.return_value = (
+            valid_response(insights)
+        )
+        no_location = {
+            "longitude": None,
+            "latitude": None,
+            "updated": None,
+            "address": None,
+        }
+        return {
+            ("environmental", "hollow1"): {
+                "insights": [],
+                "location": no_location,
+                "assessment": dict.fromkeys(
+                    (
+                        "array_data_reduction",
+                        "assessment_level",
+                        "blades",
+                        "capacity_utilization",
+                        "chassis",
+                        "power_average",
+                        "power_per_usable_capacity",
+                        "power_per_used_space",
+                        "power_typical_spec",
+                        "power_peak_spec",
+                        "heat_typical_spec",
+                        "heat_peak_spec",
+                        "heat_average",
+                        "rack_units",
+                        "shelves",
+                        "array_total_load",
+                        "start",
+                        "end",
+                    )
+                ),
+                "reporting_status": "assessment_ready",
+            },
+            ("environmental", "hollow2"): {
+                "insights": [],
+                "location": no_location,
+                "assessment": {},
+                "reporting_status": None,
+            },
+        }
+
+    def _invoices(self, client, empty):
+        invoices = [TestGenerateInvoicesDict()._invoice()]
+        if empty:
+            invoices.insert(0, sdk_model("Invoice"))
+            invoices.append(
+                sdk_model(
+                    "Invoice",
+                    id="hollow1",
+                    subscription=sdk_model("FixedReference"),
+                    lines=[
+                        sdk_model("InvoiceLine"),
+                        sdk_model(
+                            "InvoiceLine",
+                            components=[sdk_model("InvoiceLineComponent")],
+                            tax=sdk_model("Tax"),
+                        ),
+                    ],
+                )
+            )
+        client.get_invoices.return_value = valid_response(invoices)
+        no_line = {
+            "item": None,
+            "quantity": 0,
+            "description": None,
+            "start_date": None,
+            "end_date": None,
+            "components": None,
+            "unit_price": 0,
+            "amount": 0,
+            "tax_percentage": None,
+            "tax_amount": None,
+            "tax_exemption_statement": None,
+        }
+        no_component = {"item": None, "quantity": None, "description": None}
+        return {
+            ("invoices", "hollow1"): {
+                "lines": [
+                    no_line,
+                    dict(
+                        no_line,
+                        components=[no_component],
+                        tax_percentage=0,
+                        tax_amount=0,
+                    ),
+                ],
+                "status": None,
+                "amount": 0,
+                "date": None,
+                "due_date": None,
+                "ship_date": None,
+                "payment_terms": None,
+                "sales_rep": None,
+                "partner_po": None,
+                "end_user_po": None,
+                "end_user_name": None,
+                "subscription_id": None,
+                "subscription_name": None,
+            }
+        }
+
+    @pytest.mark.parametrize("subset", sorted(SUBSET_SECTIONS))
+    def test_subset_returns_the_complete_objects_with_a_warning(
+        self, pure1_client, subset
+    ):
+        answers = getattr(self, "_" + subset)
+        answers(pure1_client, False)
+        complete = run_main(pure1_info, gather_subset=[subset])
+        complete.exit_json.assert_called_once()
+        complete.warn.assert_not_called()
+        expected = complete.exit_json.call_args[1]["pure1_info"]
+        assert set(expected) == SUBSET_SECTIONS[subset]
+        assert all(expected.values())
+
+        hollow = answers(pure1_client, True)
+        module = run_main(pure1_info, gather_subset=[subset])
+
+        for path, entry in hollow.items():
+            section = expected
+            for key in path[:-1]:
+                section = section[key]
+            assert path[-1] not in section
+            section[path[-1]] = entry
+        module.exit_json.assert_called_once_with(changed=False, pure1_info=expected)
+        warnings = [call[0][0] for call in module.warn.call_args_list]
+        assert warnings == EMPTY_OBJECT_WARNINGS[subset]
+
+    def test_no_field_of_an_sdk_model_is_read_without_a_default(self):
+        # reading a field that Pure1 did not send raises AttributeError
+        fields = set()
+        for name in MODEL_CLASSES:
+            fields |= set(getattr(MODELS, name).__fields__)
+        tree = ast.parse(inspect.getsource(pure1_info))
+        read = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+
+        assert {"name", "id", "key", "value", "fqdn", "lines"} <= fields
+        assert {"items", "status_code", "get_arrays", "warn"} <= read
+        assert sorted(read & fields) == []
+
+
+# What each subset warns of for the answers of TestNullAmongTheObjects
+NULL_ENTRY_WARNINGS = {
+    "minimum": [],
+    "appliances": [
+        "Arrays without a name were left out of the appliances subset: 1.",
+        "Tags without a key were left out of the appliances subset: 2.",
+    ],
+    "subscriptions": [
+        "Subscriptions without a name were left out of the subscriptions subset: 1.",
+        "Licenses without a name were left out of the subscriptions subset: 1.",
+        "License resources without a name were left out of the subscriptions subset: 1.",
+    ],
+    "contracts": ["Arrays without a name were left out of the contracts subset: 1."],
+    "environmental": [
+        "Arrays without a name were left out of the environmental subset: 1.",
+        "Insights without an array name were left out of the environmental subset: 1.",
+    ],
+    "invoices": ["Invoices without a number were left out of the invoices subset: 1."],
+}
+
+
+class TestNullAmongTheObjects:
+    """Pure1 returns a null among the objects of a listing.
+
+    The SDK does not check what Pure1 sends, so the null reaches the module
+    as None. It has no name: a subset leaves it out and counts it as it does
+    an object without its name, and the minimum subset counts it in no type.
+    """
+
+    def _answers(self, client, null):
+        nulls = [None] if null else []
+        answers = TestObjectWithoutAnyField()
+        answers._minimum(client, False)
+        answers._arrays(
+            client, nulls + [_array("fa1", "Purity//FA"), _array("fb1", "Purity//FB")]
+        )
+        client.get_arrays_tags.side_effect = lambda resource_names: valid_response(
+            nulls + [sdk_model("Tag", key="site", value="lab")]
+        )
+        client.get_metrics_history.side_effect = lambda names, **kwargs: _series(
+            names[0], 1048576
+        )
+        client.get_arrays_support_contracts.side_effect = (
+            lambda **kwargs: valid_response()
+        )
+        client.get_subscriptions.return_value = valid_response(
+            nulls + [sdk_model("Subscription", name="sub1")]
+        )
+        license = sdk_model(
+            "SubscriptionLicense",
+            name="lic1",
+            resources=[sdk_model("LicenseResourceReference", name="res1")],
+        )
+        if null:
+            # the constructor of the model refuses a null in a list
+            license.resources.insert(0, None)
+        client.get_subscription_licenses.return_value = valid_response(
+            nulls + [license]
+        )
+        client.get_assessment_sustainability_arrays.return_value = valid_response(
+            nulls + [sdk_model("SustainabilityArray", name="fa1")]
+        )
+        client.get_assessment_sustainability_insights_arrays.return_value = (
+            valid_response(
+                nulls
+                + [
+                    sdk_model(
+                        "SustainabilityInsightArray",
+                        resource=sdk_model("FixedReferenceFqdn", name="fa1"),
+                    )
+                ]
+            )
+        )
+        client.get_invoices.return_value = valid_response(
+            nulls + [sdk_model("Invoice", id="INV-001")]
+        )
+
+    @pytest.mark.parametrize("subset", sorted(SUBSET_SECTIONS))
+    def test_null_is_left_out_and_counted_like_an_object_without_its_name(
+        self, pure1_client, subset
+    ):
+        self._answers(pure1_client, False)
+        complete = run_main(pure1_info, gather_subset=[subset])
+        complete.exit_json.assert_called_once()
+        complete.warn.assert_not_called()
+        expected = complete.exit_json.call_args[1]["pure1_info"]
+        assert set(expected) == SUBSET_SECTIONS[subset]
+        assert all(expected.values())
+
+        self._answers(pure1_client, True)
+        module = run_main(pure1_info, gather_subset=[subset])
+
+        module.exit_json.assert_called_once_with(changed=False, pure1_info=expected)
+        warnings = [call[0][0] for call in module.warn.call_args_list]
+        assert warnings == NULL_ENTRY_WARNINGS[subset]
+
+
 # The levels of the result whose keys are names: of arrays, subscriptions,
 # licenses, the resources of a license and invoices
 NAMED_LEVELS = [
@@ -2571,6 +3527,18 @@ class TestDocumentation:
         contract_found = sections["contracts"]["contains"]["contract_found"]
 
         assert "Added in version 1.6.0." in contract_found["description"]
+
+    def test_return_says_that_an_object_without_its_name_is_left_out(self):
+        returned = yaml.safe_load(pure1_info.RETURN)["pure1_info"]
+        description = " ".join(returned["description"])
+
+        # the default section lists no object: it counts an array without a name
+        assert (
+            "An array, subscription, license or resource of a license that Pure1 "
+            "returns without a name, an invoice without a number, a tag without a "
+            "key and an insight without an array name are left out of the sections "
+            "that list them, with a warning that counts them."
+        ) in description
 
     def test_examples_register_at_task_level_and_read_what_was_registered(self):
         tasks = yaml.safe_load(pure1_info.EXAMPLES)
