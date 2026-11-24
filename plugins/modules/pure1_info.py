@@ -135,7 +135,18 @@ pure1_info:
       type: dict
       contains:
         FlashArray:
-          description: The appliances that run Purity//FA, keyed by array name.
+          description:
+            - The appliances that run Purity//FA, keyed by array name.
+            - Each array also holds its performance figures, under keys that hold
+              spaces and brackets and so need bracket notation in a template.
+            - The keys 'bandwidth (read) [MB/s]' and 'bandwidth (write) [MB/s]' hold
+              bytes per second divided by 1048576 (MiB/s), rounded to three decimals.
+            - The keys 'latency (read) [ms]' and 'latency (write) [ms]' hold
+              milliseconds, rounded to two decimals.
+            - The keys 'iops (read)' and 'iops (write)' hold operations per second,
+              rounded to a whole number.
+            - The key 'load [%]' holds the load of the array in percent, rounded to
+              three decimals.
           type: dict
           contains:
             os_version:
@@ -168,33 +179,17 @@ pure1_info:
                 namespace:
                   description: Namespace of the tag.
                   type: str
-            "bandwidth (read) [MB/s]":
-              description:
-                - Read bandwidth in bytes per second divided by 1048576 (MiB/s),
-                  rounded to three decimals.
-              type: float
-            "bandwidth (write) [MB/s]":
-              description:
-                - Write bandwidth in bytes per second divided by 1048576 (MiB/s),
-                  rounded to three decimals.
-              type: float
-            "latency (read) [ms]":
-              description: Read latency in milliseconds, rounded to two decimals.
-              type: float
-            "latency (write) [ms]":
-              description: Write latency in milliseconds, rounded to two decimals.
-              type: float
-            "iops (read)":
-              description: Read operations per second, rounded to a whole number.
-              type: int
-            "iops (write)":
-              description: Write operations per second, rounded to a whole number.
-              type: int
-            "load [%]":
-              description: Load of the array in percent, rounded to three decimals.
-              type: float
         FlashBlade:
-          description: The appliances that run Purity//FB, keyed by array name.
+          description:
+            - The appliances that run Purity//FB, keyed by array name.
+            - Each array also holds its performance figures, under keys that hold
+              spaces and brackets and so need bracket notation in a template.
+            - The keys 'bandwidth (read) [MB/s]' and 'bandwidth (write) [MB/s]' hold
+              bytes per second divided by 1048576 (MiB/s), rounded to three decimals.
+            - The keys 'latency (read) [ms]' and 'latency (write) [ms]' hold
+              milliseconds, rounded to two decimals.
+            - The keys 'iops (read)' and 'iops (write)' hold operations per second,
+              rounded to a whole number.
           type: dict
           contains:
             os_version:
@@ -227,28 +222,6 @@ pure1_info:
                 namespace:
                   description: Namespace of the tag.
                   type: str
-            "bandwidth (read) [MB/s]":
-              description:
-                - Read bandwidth in bytes per second divided by 1048576 (MiB/s),
-                  rounded to three decimals.
-              type: float
-            "bandwidth (write) [MB/s]":
-              description:
-                - Write bandwidth in bytes per second divided by 1048576 (MiB/s),
-                  rounded to three decimals.
-              type: float
-            "latency (read) [ms]":
-              description: Read latency in milliseconds, rounded to two decimals.
-              type: float
-            "latency (write) [ms]":
-              description: Write latency in milliseconds, rounded to two decimals.
-              type: float
-            "iops (read)":
-              description: Read operations per second, rounded to a whole number.
-              type: int
-            "iops (write)":
-              description: Write operations per second, rounded to a whole number.
-              type: int
         ObjectEngine:
           description:
             - The appliances that run Elasticity, keyed by appliance name. No

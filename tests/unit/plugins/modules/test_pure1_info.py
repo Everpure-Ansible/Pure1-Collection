@@ -2428,6 +2428,21 @@ def _documented_keys(contains, path=()):
     return keys
 
 
+def _described_keys(sections):
+    """Return the path of every key that RETURN names in a description
+
+    The keys of the performance figures are no identifiers. validate-modules
+    refuses such a key under contains, so the description of the appliance
+    type names them, each between single quotes.
+    """
+    keys = set()
+    for kind in ("FlashArray", "FlashBlade"):
+        description = sections["appliances"]["contains"][kind]["description"]
+        for key in re.findall(r"'([^']+)'", " ".join(description)):
+            keys.add(("appliances", kind, key))
+    return keys
+
+
 class TestDocumentation:
     """DOCUMENTATION, EXAMPLES and RETURN against the code."""
 
@@ -2472,18 +2487,25 @@ class TestDocumentation:
 
         module.warn.assert_not_called()
         returned = _returned_keys(module.exit_json.call_args[1]["pure1_info"])
-        documented = _documented_keys(
-            yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
-        )
+        sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
+        documented = _documented_keys(sections) | _described_keys(sections)
         assert sorted(returned - documented) == []
         assert sorted(documented - returned) == []
 
     def test_samples_of_return_hold_documented_keys(self):
         sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
         samples = {name: section["sample"] for name, section in sections.items()}
+        documented = _documented_keys(sections) | _described_keys(sections)
 
         json.dumps(samples)
-        assert sorted(_returned_keys(samples) - _documented_keys(sections)) == []
+        assert sorted(_returned_keys(samples) - documented) == []
+
+    def test_every_key_under_contains_can_be_read_with_dot_notation(self):
+        sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
+
+        for path in _documented_keys(sections):
+            assert path[-1].isidentifier(), path
+        assert len(_described_keys(sections)) == 13
 
     def test_sample_of_a_tax_is_a_ratio_the_sdk_model_can_hold(self):
         sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
