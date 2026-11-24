@@ -1,0 +1,10 @@
+bugfixes:
+  - "pure1_array_tags - ``state=present`` with an empty ``tag`` list, or with a key given more than once, no longer reports a change on every run."
+  - "pure1_array_tags - a tag is split at its first colon only, so a value can contain colons; a value an earlier release stored cut is written whole on the next run."
+  - "pure1_array_tags - an error raised by py-pure-client now fails the task with a one-line message instead of a traceback."
+  - "pure1_array_tags - check mode reports the change a run would make to an array that already has tags; it always reported no change."
+  - "pure1_array_tags - tag keys are matched whatever their case, as Pure1 matches them, so ``state=absent`` removes a key stored in another case and ``state=present`` leaves one alone when its value is the same."
+  - "pure1_array_tags - the array is found whatever the case of ``name``, and an unknown array fails with a clear message."
+  - "pure1_array_tags - the documentation describes the tag forms, check mode and what is returned."
+  - "pure1_array_tags - the failure message of a tag removal says array instead of volume."
+  - "pure1_array_tags - with ``state=present`` a tag without a key or a value, or two tags whose keys differ only in case, fail the task with a clear message."
