@@ -516,7 +516,7 @@ class TestMain:
         module = run_main(pure1_array_tags, name="foo", tag=["key1:value1"])
 
         # the one call that lists arrays is the check of get_pure1
-        pure1_client.get_arrays.assert_called_once_with()
+        pure1_client.get_arrays.assert_called_once_with(limit=0)
         pure1_client.put_arrays_tags.assert_not_called()
         module.exit_json.assert_called_once_with(changed=False)
 

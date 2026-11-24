@@ -1,0 +1,9 @@
+security_fixes:
+  - "all modules - the TLS certificate of Pure1 is now verified for the token request and the API calls."
+  - "all modules - the access token is no longer written to ``oauth21.0token.access_token`` in the directory the play is started from; delete a file left by an earlier run."
+bugfixes:
+  - "all modules - ``app_id`` and ``key_file`` are no longer required and fall back to ``PURE1_APP_ID`` and ``PURE1_PRIVATE_KEY_FILE`` as documented."
+  - "all modules - ``password`` falls back to ``PURE1_PRIVATE_KEY_PASSWORD`` and then ``PURE1_PRIVATE_PASSWORD``; unset ``PURE1_PRIVATE_PASSWORD`` where the key is not encrypted."
+  - "all modules - a task started from a directory that cannot be written to no longer fails."
+minor_changes:
+  - "all modules - new option ``validate_certs``, default ``true``, to switch certificate verification off."
