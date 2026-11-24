@@ -73,21 +73,6 @@ def _answer_with(client, method, answer):
     getattr(client, method).return_value = answer
 
 
-@pytest.fixture
-def host_west_of_utc():
-    """Put the host five hours behind UTC, for whatever reads the local time.
-
-    A date of Pure1 is 00:00 UTC of that day, which is the evening before in
-    this zone. localtime_ahead_of_utc cannot show a date in local time: ahead
-    of UTC the day is the same, and datetime does not use time.localtime().
-    """
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setenv("TZ", "EST5")
-        time.tzset()
-        yield
-    time.tzset()
-
-
 class TestStandIns:
     """The fixtures must not invent what the SDK does not have."""
 

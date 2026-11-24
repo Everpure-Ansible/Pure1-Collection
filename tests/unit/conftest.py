@@ -16,7 +16,9 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
+import ast
 import importlib
+import os
 import pkgutil
 import re
 import sys
@@ -31,6 +33,7 @@ try:
     from ansible.module_utils.common.arg_spec import ArgumentSpecValidator
     from ansible.module_utils.errors import UnsupportedError
     from pypureclient import ApiError, ErrorResponse, ValidResponse
+    from pypureclient._transport.api_response import ApiResponse
     from pypureclient.responses import ItemIterator
 
     # The module itself: the name pure1 in pypureclient starts as a lazy loader
@@ -41,13 +44,65 @@ except ImportError as error:
         "python -m pip install -r tests/requirements.txt ({0})".format(error)
     ) from error
 
-from plugins.module_utils import pure1 as pure1_utils
+MODULE_UTILS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "plugins",
+    "module_utils",
+)
 
-# The modules import module_utils under its collection name. Nothing provides
+
+def _imported_names(path, alias, names):
+    """Return the names of the modules a file imports under the alias package."""
+    with open(path, encoding="utf-8") as source:
+        tree = ast.parse(source.read())
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            found.append(node.module or "")
+            found += ["{0}.{1}".format(node.module, name.name) for name in node.names]
+        elif isinstance(node, ast.Import):
+            found += [name.name for name in node.names]
+    return [name for name in names if "{0}.{1}".format(alias, name) in found]
+
+
+def alias_module_utils(directory, package, alias):
+    """Give package and every module in its directory a second name under alias.
+
+    A module that imports another one of the directory by its alias gets that
+    one first, so that the import finds the module the tests import whatever
+    the order of the files. Only the files get the name: a package in the
+    directory gets none. Returns the names of the modules.
+    """
+    names = sorted(
+        info.name for info in pkgutil.iter_modules([directory]) if not info.ispkg
+    )
+    started = set()
+    # for "from <alias> import <name>"
+    sys.modules[alias] = importlib.import_module(package)
+
+    def load(name):
+        if name in started:
+            return
+        started.add(name)
+        path = os.path.join(directory, name + ".py")
+        for other in _imported_names(path, alias, names):
+            load(other)
+        module = importlib.import_module("{0}.{1}".format(package, name))
+        sys.modules["{0}.{1}".format(alias, name)] = module
+
+    for name in names:
+        load(name)
+    return names
+
+
+# The plugins import module_utils under its collection name. Nothing provides
 # that name without pytest-ansible, and with it the import would load a second
-# copy of the file. Both ways they get the module the tests import.
-sys.modules["ansible_collections.everpure.pure1.plugins.module_utils.pure1"] = (
-    pure1_utils
+# copy of the file. Both ways they get the module the tests import, for every
+# file of plugins/module_utils.
+alias_module_utils(
+    MODULE_UTILS,
+    "plugins.module_utils",
+    "ansible_collections.everpure.pure1.plugins.module_utils",
 )
 
 
@@ -270,6 +325,74 @@ def valid_response(items=(), total_item_count=None):
     return ValidResponse(200, None, total_item_count, page, {})
 
 
+def paged_answers(response_class, items, page_size=1000, total_item_count=-1):
+    """Return a side_effect that answers a listing call page by page, as Pure1 does.
+
+    response_class is the SDK model of the answer ("HardwareGetResponse") and
+    items everything Pure1 has for the call. Each request gets the items from
+    its offset on, at most its limit and never more than page_size of them
+    (Pure1: 1000), with the total of all items (total_item_count: another
+    number, or None for an answer without one). A request without sort gets a
+    continuation token while items remain after its page; one with sort gets
+    none, as from Pure1. The answer is built by the SDK's own client code, so
+    its items are the SDK iterator, which asks for the page of a token itself.
+    Every request, also those of the iterator, is kept as its keywords in the
+    attribute requests of the side_effect. Code that asks for page after page
+    without an end fails the test.
+
+    The SDK would rebuild an item of another class as the class the answer
+    holds and drop fields, and has None for a response class it does not
+    know. Both are refused here, as sdk_model does. The items of an answer
+    are copies of the items given: equal, not the same objects.
+    """
+    items = list(items)
+    model = getattr(MODELS, response_class, None)
+    if model is None or "items" not in getattr(model, "__fields__", {}):
+        raise TypeError("the SDK has no model {0} with items".format(response_class))
+    item_class = model.__fields__["items"].type_
+    for item in items:
+        if not isinstance(item, item_class):
+            raise TypeError(
+                "{0} holds {1}, not {2}".format(
+                    response_class, item_class.__name__, type(item).__name__
+                )
+            )
+
+    def page(kwargs):
+        if len(answers.requests) >= 2 * len(items) + 10:
+            pytest.fail(
+                "{0}: page after page is asked for, the last with {1}".format(
+                    response_class, kwargs
+                )
+            )
+        answers.requests.append(dict(kwargs))
+        start = kwargs.get("offset") or 0
+        if kwargs.get("continuation_token"):
+            start = int(kwargs["continuation_token"].rsplit("-", 1)[1])
+        size = page_size
+        if kwargs.get("limit") is not None:
+            size = min(kwargs["limit"], page_size)
+        fields = dict(items=items[start : start + size])
+        if not kwargs.get("sort") and start + size < len(items):
+            fields["continuation_token"] = "page-{0}".format(start + size)
+        total = len(items) if total_item_count == -1 else total_item_count
+        if total is not None:
+            fields["total_item_count"] = total
+        return ApiResponse(200, {}, model(**fields))
+
+    def later_page(**kwargs):
+        return page(kwargs)
+
+    def answers(**kwargs):
+        # as Client._call_api does with the answer to the first request
+        return NEWEST.Client._create_valid_response(
+            None, page(kwargs), later_page, dict(kwargs)
+        )
+
+    answers.requests = []
+    return answers
+
+
 def error_response(status_code, message=None, context=None):
     """Return the SDK answer to a refused call: a status and one error, no items."""
     return ErrorResponse(status_code, [ApiError(context, message)], {})
@@ -340,3 +463,21 @@ def localtime_ahead_of_utc(monkeypatch):
     CI, local time is UTC and code that used localtime() would pass.
     """
     monkeypatch.setattr(time, "localtime", _thirteen_hours_ahead)
+
+
+@pytest.fixture
+def host_west_of_utc():
+    """Put the host five hours behind UTC, for whatever reads the local time.
+
+    For a time or a date the code must give in UTC whatever the zone of the
+    host. localtime_ahead_of_utc cannot show a date in local time: ahead of
+    UTC a 00:00 UTC date is the same day, and datetime does not use
+    time.localtime().
+    """
+    try:
+        with pytest.MonkeyPatch.context() as host:
+            host.setenv("TZ", "EST5")
+            time.tzset()
+            yield
+    finally:
+        time.tzset()

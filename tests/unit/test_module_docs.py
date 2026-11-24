@@ -84,3 +84,24 @@ def test_examples_read_only_what_an_earlier_task_registered(module):
 @pytest.mark.parametrize("module", MODULES)
 def test_module_has_no_ansible_metadata(module):
     assert "ANSIBLE_METADATA" not in _assignments(module)
+
+
+def _readme_modules():
+    """Return the names in the list under "Available Modules" of README.md"""
+    readme = os.path.join(MODULES_DIR, os.pardir, os.pardir, "README.md")
+    with open(readme, encoding="utf-8") as source:
+        section = source.read().split("### Available Modules\n", 1)[1]
+    # the list ends at the next heading
+    section = re.split(r"^#", section, maxsplit=1, flags=re.MULTILINE)[0]
+    return re.findall(r"^- (\S+)", section, flags=re.MULTILINE)
+
+
+def test_readme_lists_every_module_once():
+    """Each file of plugins/modules exactly once, and nothing else"""
+    files = sorted(
+        name[:-3]
+        for name in os.listdir(MODULES_DIR)
+        if name.endswith(".py") and name != "__init__.py"
+    )
+
+    assert sorted(_readme_modules()) == files
