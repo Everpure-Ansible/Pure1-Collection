@@ -9,11 +9,15 @@ __metaclass__ = type
 
 import datetime
 import json
+import re
 import time
 
 import pytest
-from pypureclient import ErrorResponse
+import yaml
+from pypureclient import ErrorResponse, PureError
+from urllib3.exceptions import ProtocolError
 
+from plugins.module_utils.pure1 import pure1_argument_spec
 from plugins.modules import pure1_info
 from plugins.modules.pure1_info import (
     Pure1ResponseError,
@@ -22,7 +26,6 @@ from plugins.modules.pure1_info import (
     generate_default_dict,
     generate_esg_dict,
     generate_subscriptions_dict,
-    generate_subscription_assets_dict,
     generate_subscription_licenses_dict,
     generate_contract_dict,
     generate_invoices_dict,
@@ -62,26 +65,25 @@ def _received_model(class_name, **wire):
     return cls.from_dict(wire)
 
 
-class _SwaggerInvoice:
-    """Invoice of a py-pure-client whose models were generated with swagger.
-
-    Those models name the date of the invoice _date. The installed SDK cannot
-    build one, so this object alone is written by hand. Like an SDK model it
-    raises AttributeError for a field that was not set.
-    """
-
-    def __init__(self, **fields):
-        vars(self).update(fields)
-
-
 def _answer_with(client, method, answer):
     """Make one client method return the given error answer on every call"""
     getattr(client, method).side_effect = None
     getattr(client, method).return_value = answer
 
 
-def _local_date(epoch_ms):
-    return datetime.datetime.fromtimestamp(int(epoch_ms / 1000)).strftime("%Y-%m-%d")
+@pytest.fixture
+def host_west_of_utc():
+    """Put the host five hours behind UTC, for whatever reads the local time.
+
+    A date of Pure1 is 00:00 UTC of that day, which is the evening before in
+    this zone. localtime_ahead_of_utc cannot show a date in local time: ahead
+    of UTC the day is the same, and datetime does not use time.localtime().
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("TZ", "EST5")
+        time.tzset()
+        yield
+    time.tzset()
 
 
 class TestStandIns:
@@ -111,6 +113,15 @@ class TestStandIns:
             getattr(series, "name")
         with pytest.raises(TypeError):
             _received_model("MetricHistory", site="lab")
+
+    @pytest.mark.usefixtures("host_west_of_utc")
+    def test_host_west_of_utc_shows_the_day_before(self):
+        seconds = JAN_2021_MS / 1000
+
+        assert time.strftime("%Y-%m-%d", time.localtime(seconds)) == "2020-12-31"
+        local = datetime.datetime.fromtimestamp(seconds)
+        assert local.strftime("%Y-%m-%d") == "2020-12-31"
+        assert time.strftime("%Y-%m-%d", time.gmtime(seconds)) == "2021-01-01"
 
 
 class TestGenerateDefaultDict:
@@ -167,6 +178,18 @@ class TestGenerateDefaultDict:
         assert result["FlashArrays"] == 3
         assert result["FlashBlades"] == 2
         assert result["ObjectEngines"] == 1
+
+    def test_array_without_an_os_is_counted_in_no_type(self, pure1_client):
+        client = self._client(pure1_client)
+        client.get_arrays.return_value = valid_response(
+            [sdk_model("Array", name="a1"), sdk_model("Array", os="Purity//FA")]
+        )
+
+        result = generate_default_dict(client)
+
+        assert result["FlashArrays"] == 1
+        assert result["FlashBlades"] == 0
+        assert result["ObjectEngines"] == 0
 
     @pytest.mark.parametrize(
         "method",
@@ -271,6 +294,25 @@ class TestGenerateSubscriptionsDict:
 
         assert result["sub1"]["org_name"] is None
 
+    def test_subscription_with_only_a_name(self, pure1_client):
+        pure1_client.get_subscriptions.return_value = valid_response(
+            [sdk_model("Subscription", name="sub1")]
+        )
+
+        result = generate_subscriptions_dict(pure1_client)
+
+        assert result == {
+            "sub1": {
+                "start_date": None,
+                "expiration_date": None,
+                "service": None,
+                "status": None,
+                "org_name": None,
+                "partner_name": None,
+                "subscription_term": None,
+            }
+        }
+
     def test_empty_subscriptions_returns_empty_dict(self, pure1_client):
         pure1_client.get_subscriptions.return_value = valid_response()
 
@@ -281,51 +323,6 @@ class TestGenerateSubscriptionsDict:
 
         with pytest.raises(Pure1ResponseError):
             generate_subscriptions_dict(pure1_client)
-
-
-# generate_subscription_assets_dict is not called by the module. The asset is
-# the SDK model: it has none of the eight fields the function reads on it.
-class TestGenerateSubscriptionAssetsDict:
-    """Tests for generate_subscription_assets_dict."""
-
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AttributeError,
-        reason="D035 assets code reads eight fields SubscriptionAsset does not have",
-    )
-    def test_maps_asset_fields_and_activation_date(self, pure1_client):
-        pure1_client.get_subscription_assets.return_value = valid_response(
-            [
-                sdk_model(
-                    "SubscriptionAsset",
-                    name="asset1",
-                    activation_date=JAN_2021_MS,
-                    # Pure1 sends these three under array, not on the asset
-                    array=sdk_model(
-                        "SubscriptionAssetArray",
-                        version="1.2.3",
-                        model="FA-X70",
-                        chassis_serial_number="CH-001",
-                    ),
-                    subscription=sdk_model("FixedReference", name="sub1", id="sid-1"),
-                    license=sdk_model("FixedReference", name="lic1", id="lid-1"),
-                )
-            ]
-        )
-
-        result = generate_subscription_assets_dict(pure1_client)
-
-        assert result["asset1"]["install_location"] == "DC1"
-        assert result["asset1"]["activation_date"] == "2021-01-01 00:00:00 UTC"
-        assert result["asset1"]["model"] == "FA-X70"
-        assert result["asset1"]["subscription_name"] == "sub1"
-        assert result["asset1"]["subscription_id"] == "sid-1"
-        assert result["asset1"]["license_name"] == "lic1"
-
-    def test_empty_assets_returns_empty_dict(self, pure1_client):
-        pure1_client.get_subscription_assets.return_value = valid_response()
-
-        assert generate_subscription_assets_dict(pure1_client) == {}
 
 
 class TestGenerateContractDict:
@@ -397,10 +394,105 @@ class TestGenerateContractDict:
         result = generate_contract_dict(client)
 
         assert result["foo"] == {
-            "contract_start": _local_date(JAN_2021_MS),
-            "contract_end": _local_date(FEB_2021_MS),
+            "contract_start": "2021-01-01",
+            "contract_end": "2021-02-01",
             "contract_state": "Expired",
+            "contract_found": True,
         }
+
+    @pytest.mark.usefixtures("host_west_of_utc")
+    def test_dates_are_utc_whatever_the_zone_of_the_host(self, pure1_client):
+        client = self._client_with_contract(pure1_client, JAN_2021_MS, FEB_2021_MS)
+
+        result = generate_contract_dict(client)
+
+        assert result["foo"]["contract_start"] == "2021-01-01"
+        assert result["foo"]["contract_end"] == "2021-02-01"
+
+    @pytest.mark.parametrize(
+        "dates, start, end",
+        [
+            ({}, None, None),
+            ({"end_date": FEB_2021_MS}, None, "2021-02-01"),
+            ({"start_date": JAN_2021_MS}, "2021-01-01", None),
+        ],
+        ids=["no dates", "no start date", "no end date"],
+    )
+    def test_record_without_a_date_gives_null_for_it(
+        self, pure1_client, dates, start, end
+    ):
+        pure1_client.get_arrays.return_value = valid_response(
+            [sdk_model("Array", name="foo")]
+        )
+        pure1_client.get_arrays_support_contracts.return_value = valid_response(
+            [sdk_model("SupportContract", **dates)]
+        )
+
+        result = generate_contract_dict(pure1_client)
+
+        assert result["foo"] == {
+            "contract_start": start,
+            "contract_end": end,
+            "contract_state": "Expired",
+            "contract_found": True,
+        }
+
+    def test_dates_are_not_carried_over_from_the_previous_array(self, pure1_client):
+        pure1_client.get_arrays.return_value = valid_response(
+            [sdk_model("Array", name="foo"), sdk_model("Array", name="bar")]
+        )
+        pure1_client.get_arrays_support_contracts.side_effect = [
+            valid_response(
+                [
+                    sdk_model(
+                        "SupportContract", start_date=JAN_2021_MS, end_date=FEB_2021_MS
+                    )
+                ]
+            ),
+            valid_response([sdk_model("SupportContract")]),
+        ]
+
+        result = generate_contract_dict(pure1_client)
+
+        assert result == {
+            "foo": {
+                "contract_start": "2021-01-01",
+                "contract_end": "2021-02-01",
+                "contract_state": "Expired",
+                "contract_found": True,
+            },
+            "bar": {
+                "contract_start": None,
+                "contract_end": None,
+                "contract_state": "Expired",
+                "contract_found": True,
+            },
+        }
+
+    def test_date_of_zero_counts_as_no_date(self, pure1_client):
+        client = self._client_with_contract(pure1_client, 0, 0)
+
+        result = generate_contract_dict(client)
+
+        assert result["foo"] == {
+            "contract_start": None,
+            "contract_end": None,
+            "contract_state": "Expired",
+            "contract_found": True,
+        }
+
+    def test_array_name_is_escaped_in_the_filter(self, pure1_client):
+        pure1_client.get_arrays.return_value = valid_response(
+            [sdk_model("Array", name="o'brien\\x")]
+        )
+        pure1_client.get_arrays_support_contracts.return_value = valid_response()
+
+        result = generate_contract_dict(pure1_client)
+
+        pure1_client.get_arrays_support_contracts.assert_called_once_with(
+            filter="resource.name='o\\'brien\\\\x'"
+        )
+        assert list(result) == ["o'brien\\x"]
 
     def test_no_contract_data_is_expired(self, pure1_client):
         pure1_client.get_arrays.return_value = valid_response(
@@ -410,7 +502,31 @@ class TestGenerateContractDict:
 
         result = generate_contract_dict(pure1_client)
 
-        assert result["foo"] == {"contract_state": "Expired"}
+        assert result["foo"] == {"contract_state": "Expired", "contract_found": False}
+
+    def test_contract_found_tells_a_lapsed_contract_from_none(self, pure1_client):
+        now = int(time.time() * 1000)
+        pure1_client.get_arrays.return_value = valid_response(
+            [sdk_model("Array", name="foo"), sdk_model("Array", name="bar")]
+        )
+        pure1_client.get_arrays_support_contracts.side_effect = [
+            valid_response(
+                [
+                    sdk_model(
+                        "SupportContract",
+                        start_date=now - 86400000 * 365,
+                        end_date=now - 86400000 * 60,
+                    )
+                ]
+            ),
+            valid_response(),
+        ]
+
+        result = generate_contract_dict(pure1_client)
+
+        assert result["foo"]["contract_state"] == "Expired"
+        assert result["foo"]["contract_found"] is True
+        assert result["bar"] == {"contract_state": "Expired", "contract_found": False}
 
     def test_error_answer_for_an_array_is_raised(self, pure1_client):
         pure1_client.get_arrays.return_value = valid_response(
@@ -475,9 +591,21 @@ class TestGenerateEsgDict:
         )
         return client
 
+    def _result(self, client, appliances, insights=()):
+        """Return the module and the section for these appliances and insights"""
+        client.get_assessment_sustainability_arrays.return_value = valid_response(
+            appliances
+        )
+        client.get_assessment_sustainability_insights_arrays.return_value = (
+            valid_response(insights)
+        )
+        module = ansible_module()
+        return module, generate_esg_dict(module, client)
+
     def test_ready_appliance_with_an_insight(self, pure1_client):
         result = generate_esg_dict(ansible_module(), self._client(pure1_client))
 
+        assert result["fa1"]["reporting_status"] == "assessment_ready"
         assert result["fa1"]["location"] == {
             "longitude": -122.1,
             "latitude": 37.4,
@@ -566,6 +694,252 @@ class TestGenerateEsgDict:
             "assessment": {},
             "reporting_status": "not_enough_data",
         }
+
+    def test_reporting_status_is_the_string_for_every_appliance(self, pure1_client):
+        statuses = {
+            "fa1": "assessment_ready",
+            "fa2": "not_enough_data",
+            "fa3": "not_phoning_home",
+            "fa4": "unsupported_purity_version",
+        }
+        module, result = self._result(
+            pure1_client,
+            [
+                sdk_model("SustainabilityArray", name=name, reporting_status=status)
+                for name, status in statuses.items()
+            ],
+        )
+
+        assert {
+            name: entry["reporting_status"] for name, entry in result.items()
+        } == statuses
+        module.warn.assert_not_called()
+
+    def test_appliance_with_only_a_name(self, pure1_client):
+        module, result = self._result(
+            pure1_client, [sdk_model("SustainabilityArray", name="fa1")]
+        )
+
+        assert result == {
+            "fa1": {
+                "insights": [],
+                "location": {},
+                "assessment": {},
+                "reporting_status": None,
+            }
+        }
+        module.warn.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "address, location",
+        [
+            (
+                {"street_address": "1 Main Street", "updated": JAN_2021_MS},
+                {
+                    "longitude": None,
+                    "latitude": None,
+                    "updated": "2021-01-01 00:00:00 UTC",
+                    "address": "1 Main Street",
+                },
+            ),
+            (
+                {},
+                {
+                    "longitude": None,
+                    "latitude": None,
+                    "updated": None,
+                    "address": None,
+                },
+            ),
+        ],
+        ids=["no geolocation", "no field at all"],
+    )
+    def test_address_without_a_geolocation(self, pure1_client, address, location):
+        module, result = self._result(
+            pure1_client,
+            [
+                sdk_model(
+                    "SustainabilityArray",
+                    name="fa1",
+                    reporting_status="not_enough_data",
+                    install_address=sdk_model("InstallAddress", **address),
+                )
+            ],
+        )
+
+        assert result["fa1"]["location"] == location
+
+    def test_geolocation_without_coordinates(self, pure1_client):
+        module, result = self._result(
+            pure1_client,
+            [
+                sdk_model(
+                    "SustainabilityArray",
+                    name="fa1",
+                    install_address=sdk_model(
+                        "InstallAddress", geolocation=sdk_model("Geolocation")
+                    ),
+                )
+            ],
+        )
+
+        assert result["fa1"]["location"] == {
+            "longitude": None,
+            "latitude": None,
+            "updated": None,
+            "address": None,
+        }
+
+    def test_ready_appliance_without_an_assessment(self, pure1_client):
+        module, result = self._result(
+            pure1_client,
+            [
+                sdk_model(
+                    "SustainabilityArray",
+                    name="fa1",
+                    reporting_status="assessment_ready",
+                )
+            ],
+        )
+
+        assert result == {
+            "fa1": {
+                "insights": [],
+                "location": {},
+                "assessment": {},
+                "reporting_status": "assessment_ready",
+            }
+        }
+
+    def test_ready_appliance_with_an_empty_assessment(self, pure1_client):
+        module, result = self._result(
+            pure1_client,
+            [
+                sdk_model(
+                    "SustainabilityArray",
+                    name="fa1",
+                    reporting_status="assessment_ready",
+                    assessment=sdk_model("SustainabilityAssessment"),
+                )
+            ],
+        )
+
+        assessment = result["fa1"]["assessment"]
+        assert len(assessment) == 18
+        assert set(assessment.values()) == {None}
+
+    def test_appliance_that_is_not_ready_has_no_assessment(self, pure1_client):
+        module, result = self._result(
+            pure1_client,
+            [
+                sdk_model(
+                    "SustainabilityArray",
+                    name="fa1",
+                    reporting_status="not_enough_data",
+                    assessment=sdk_model(
+                        "SustainabilityAssessment", assessment_level="good"
+                    ),
+                )
+            ],
+        )
+
+        assert result == {
+            "fa1": {
+                "insights": [],
+                "location": {},
+                "assessment": {},
+                "reporting_status": "not_enough_data",
+            }
+        }
+
+    def test_insight_for_an_array_that_is_not_listed(self, pure1_client):
+        module, result = self._result(
+            pure1_client,
+            [
+                sdk_model(
+                    "SustainabilityArray",
+                    name="fa1",
+                    reporting_status="not_enough_data",
+                )
+            ],
+            [
+                sdk_model(
+                    "SustainabilityInsightArray",
+                    resource=sdk_model(
+                        "FixedReferenceFqdn", name="other1", fqdn="other1.example.com"
+                    ),
+                    type="high_power_consumption",
+                    severity="high",
+                    additional_data={"power": 512.5},
+                )
+            ]
+            * 2,
+        )
+
+        insight = {
+            "fqdn": "other1.example.com",
+            "type": "high_power_consumption",
+            "severity": "high",
+            "insight_data": {"power": 512.5},
+        }
+        assert result == {
+            "fa1": {
+                "insights": [],
+                "location": {},
+                "assessment": {},
+                "reporting_status": "not_enough_data",
+            },
+            "other1": {
+                "insights": [insight, insight],
+                "location": {},
+                "assessment": {},
+                "reporting_status": None,
+            },
+        }
+        module.warn.assert_not_called()
+
+    def test_insight_without_an_array_name_is_left_out(self, pure1_client):
+        module, result = self._result(
+            pure1_client,
+            [sdk_model("SustainabilityArray", name="fa1")],
+            [
+                sdk_model("SustainabilityInsightArray", type="no_resource"),
+                sdk_model(
+                    "SustainabilityInsightArray",
+                    resource=sdk_model("FixedReferenceFqdn", fqdn="x1.example.com"),
+                    type="no_name",
+                ),
+                sdk_model(
+                    "SustainabilityInsightArray",
+                    resource=sdk_model("FixedReferenceFqdn", name="fa1"),
+                    type="named",
+                ),
+            ],
+        )
+
+        assert list(result) == ["fa1"]
+        assert [insight["type"] for insight in result["fa1"]["insights"]] == ["named"]
+        module.warn.assert_called_once_with(
+            "Insights without an array name were left out of the "
+            "environmental subset: 2."
+        )
+
+    def test_insight_with_only_an_array_name(self, pure1_client):
+        module, result = self._result(
+            pure1_client,
+            [sdk_model("SustainabilityArray", name="fa1")],
+            [
+                sdk_model(
+                    "SustainabilityInsightArray",
+                    resource=sdk_model("FixedReferenceFqdn", name="fa1"),
+                )
+            ],
+        )
+
+        assert result["fa1"]["insights"] == [
+            {"fqdn": None, "type": None, "severity": None, "insight_data": None}
+        ]
+        module.warn.assert_not_called()
 
     @pytest.mark.parametrize(
         "method",
@@ -717,17 +1091,17 @@ class TestGenerateSubscriptionLicensesDict:
             self._license(
                 site_address=sdk_model(
                     "BaseAddress",
-                    city="Mountain View",
-                    state="CA",
-                    country="UNITED STATES",
+                    city="Example City",
+                    state="EX",
+                    country="EXAMPLE COUNTRY",
                 )
             ),
         )
 
         assert result["lic1"]["location"] == {
-            "city": "Mountain View",
-            "state": "CA",
-            "country": "UNITED STATES",
+            "city": "Example City",
+            "state": "EX",
+            "country": "EXAMPLE COUNTRY",
         }
 
     def test_location_and_energy_usage_are_none_without_site_address(
@@ -803,7 +1177,7 @@ class TestGenerateSubscriptionLicensesDict:
             pure1_client,
             self._license(
                 pre_ratio=sdk_model("SubscriptionLicensePreRatio", data=3.45, unit=""),
-                site_address=sdk_model("BaseAddress", city="Mountain View"),
+                site_address=sdk_model("BaseAddress", city="Example City"),
             ),
         )
 
@@ -879,9 +1253,9 @@ class TestGenerateInvoicesDict:
             "lines": result["INV-001"]["lines"],
             "status": "paid",
             "amount": 2000,
-            "date": _local_date(JAN_2021_MS),
-            "due_date": _local_date(JAN_2021_MS),
-            "ship_date": _local_date(JAN_2021_MS),
+            "date": "2021-01-01",
+            "due_date": "2021-01-01",
+            "ship_date": "2021-01-01",
             "payment_terms": "NET30",
             "sales_rep": "Jane Rep",
             "partner_po": "PO-1",
@@ -902,19 +1276,36 @@ class TestGenerateInvoicesDict:
             ),
         )
 
-        assert result["INV-001"]["date"] == _local_date(JAN_2021_MS)
-        assert result["INV-001"]["due_date"] == _local_date(FEB_2021_MS)
-        assert result["INV-001"]["ship_date"] == _local_date(MAR_2021_MS)
-        assert result["INV-001"]["lines"][0]["start_date"] == _local_date(FEB_2021_MS)
-        assert result["INV-001"]["lines"][0]["end_date"] == _local_date(MAR_2021_MS)
+        assert result["INV-001"]["date"] == "2021-01-01"
+        assert result["INV-001"]["due_date"] == "2021-02-01"
+        assert result["INV-001"]["ship_date"] == "2021-03-01"
+        assert result["INV-001"]["lines"][0]["start_date"] == "2021-02-01"
+        assert result["INV-001"]["lines"][0]["end_date"] == "2021-03-01"
 
-    def test_date_is_read_from_an_older_sdk_model(self, pure1_client):
-        # py-pure-client models generated with swagger name the field _date
-        invoice = _SwaggerInvoice(id="INV-001", _date=JAN_2021_MS)
+    @pytest.mark.usefixtures("host_west_of_utc")
+    def test_dates_are_utc_whatever_the_zone_of_the_host(self, pure1_client):
+        result = self._result(
+            pure1_client,
+            self._invoice(
+                var_date=JAN_2021_MS,
+                due_date=FEB_2021_MS,
+                ship_date=MAR_2021_MS,
+                lines=[self._line(start_date=FEB_2021_MS, end_date=MAR_2021_MS)],
+            ),
+        )
 
-        result = self._result(pure1_client, invoice)
+        assert result["INV-001"]["date"] == "2021-01-01"
+        assert result["INV-001"]["due_date"] == "2021-02-01"
+        assert result["INV-001"]["ship_date"] == "2021-03-01"
+        assert result["INV-001"]["lines"][0]["start_date"] == "2021-02-01"
+        assert result["INV-001"]["lines"][0]["end_date"] == "2021-03-01"
 
-        assert result["INV-001"]["date"] == _local_date(JAN_2021_MS)
+    def test_invoice_date_is_read_from_var_date_alone(self):
+        # no supported py-pure-client names the date of an invoice _date
+        fields = generate_invoices_dict.__code__.co_consts
+
+        assert "var_date" in fields
+        assert "_date" not in fields
 
     def test_invoice_lines_are_appended(self, pure1_client):
         result = self._result(pure1_client, self._invoice())
@@ -924,8 +1315,8 @@ class TestGenerateInvoicesDict:
                 "item": "FA-X70",
                 "quantity": 2,
                 "description": "Flash storage",
-                "start_date": _local_date(JAN_2021_MS),
-                "end_date": _local_date(JAN_2021_MS),
+                "start_date": "2021-01-01",
+                "end_date": "2021-01-01",
                 "components": [
                     {"item": "Shelf", "quantity": 1, "description": "Shelf"},
                     {"item": "Cable", "quantity": None, "description": None},
@@ -1160,13 +1551,90 @@ class TestGenerateAppliancesDict:
         ]
 
     def test_error_answer_for_tags_leaves_them_empty(self, pure1_client):
+        module = ansible_module()
         client = _appliances_client(pure1_client, [_array("fa1", "Purity//FA")])
         client.get_arrays_tags.side_effect = None
         client.get_arrays_tags.return_value = error_response(400, "Bad request")
 
-        result = generate_appliances_dict(ansible_module(), client)
+        result = generate_appliances_dict(module, client)
 
         assert result["FlashArray"]["fa1"]["tags"] == []
+        module.warn.assert_called_once_with(
+            "Tags not collected for fa1. Status code: 400. Error: Bad request"
+        )
+
+    @pytest.mark.parametrize(
+        "array_os, section",
+        [
+            ("Purity//FA", "FlashArray"),
+            ("Purity//FB", "FlashBlade"),
+            ("Elasticity", "ObjectEngine"),
+        ],
+    )
+    def test_failed_tag_call_gives_a_warning_for_each_array(
+        self, pure1_client, array_os, section
+    ):
+        module = ansible_module()
+        client = _appliances_client(
+            pure1_client, [_array("a1", array_os), _array("a2", array_os)]
+        )
+        client.get_arrays_tags.side_effect = [
+            error_response(403),
+            valid_response([sdk_model("Tag", key="site", value="lab")]),
+        ]
+
+        result = generate_appliances_dict(module, client)
+
+        assert result[section] == {
+            "a1": {
+                "os_version": "6.5.0",
+                "model": "FA-X70R4",
+                "fqdn": "a1.example.com",
+                "tags": [],
+            },
+            "a2": {
+                "os_version": "6.5.0",
+                "model": "FA-X70R4",
+                "fqdn": "a2.example.com",
+                "tags": [
+                    {"key": "site", "value": "lab", "org_id": None, "namespace": None}
+                ],
+            },
+        }
+        module.warn.assert_called_once_with(
+            "Tags not collected for a1. Status code: 403."
+        )
+
+    @pytest.mark.parametrize(
+        "array_os, section",
+        [
+            ("Purity//FA", "FlashArray"),
+            ("Purity//FB", "FlashBlade"),
+            ("Elasticity", "ObjectEngine"),
+        ],
+    )
+    def test_array_with_only_a_name_and_an_os(self, pure1_client, array_os, section):
+        module = ansible_module()
+        client = _appliances_client(
+            pure1_client, [sdk_model("Array", name="a1", os=array_os)]
+        )
+
+        result = generate_appliances_dict(module, client)
+
+        assert result[section] == {
+            "a1": {"os_version": None, "model": None, "fqdn": "", "tags": []}
+        }
+        module.warn.assert_not_called()
+
+    def test_array_without_an_os_gives_a_warning(self, pure1_client):
+        module = ansible_module()
+        client = _appliances_client(pure1_client, [sdk_model("Array", name="a1")])
+
+        result = generate_appliances_dict(module, client)
+
+        assert result == {"FlashArray": {}, "FlashBlade": {}, "ObjectEngine": {}}
+        module.warn.assert_called_once_with("Unknown operating system detected: None.")
+        client.get_arrays_tags.assert_not_called()
 
     def test_flasharray_metrics(self, pure1_client):
         module = ansible_module()
@@ -1476,6 +1944,71 @@ class TestCollectSubset:
             "Failed to collect the subscriptions subset. Status code: 502."
         )
 
+    @pytest.mark.parametrize("status", [401, 404])
+    def test_no_other_refusal_returns_the_section_empty(self, pure1_client, status):
+        module = ansible_module()
+        pure1_client.get_subscriptions.return_value = error_response(status, "Refused")
+
+        with pytest.raises(SystemExit):
+            collect_subset(
+                module, "subscriptions", generate_subscriptions_dict, pure1_client
+            )
+
+        module.fail_json.assert_called_once_with(
+            msg="Failed to collect the subscriptions subset. "
+            "Status code: {0}. Error: Refused".format(status)
+        )
+        module.warn.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "error, text",
+        [
+            (PureError("boom"), "PureError: boom"),
+            (
+                ProtocolError("Connection aborted."),
+                "ProtocolError: Connection aborted.",
+            ),
+            (
+                PureError("(500)\nReason: Server Error\nHTTP response body: {}\n"),
+                "PureError: (500) Reason: Server Error",
+            ),
+        ],
+        ids=["SDK error", "transport error", "text of several lines"],
+    )
+    def test_raised_error_fails_with_one_line(self, pure1_client, error, text):
+        module = ansible_module()
+        pure1_client.get_subscriptions.side_effect = error
+
+        with pytest.raises(SystemExit):
+            collect_subset(
+                module, "subscriptions", generate_subscriptions_dict, pure1_client
+            )
+
+        module.fail_json.assert_called_once_with(
+            msg="Failed to collect the subscriptions subset. " + text
+        )
+        module.warn.assert_not_called()
+
+    def test_error_while_the_items_are_read_fails_with_one_line(self, pure1_client):
+        module = ansible_module()
+
+        def later_page():
+            yield sdk_model("Subscription", name="sub1")
+            raise PureError("boom")
+
+        answer = valid_response()
+        answer.items = later_page()
+        pure1_client.get_subscriptions.return_value = answer
+
+        with pytest.raises(SystemExit):
+            collect_subset(
+                module, "subscriptions", generate_subscriptions_dict, pure1_client
+            )
+
+        module.fail_json.assert_called_once_with(
+            msg="Failed to collect the subscriptions subset. PureError: boom"
+        )
+
 
 # The listing and count calls of each subset but invoices, with the section
 # of the result each one fills: (subset, client method, section)
@@ -1500,6 +2033,13 @@ LISTING_CALLS = [
         "get_assessment_sustainability_insights_arrays",
         "environmental",
     ),
+]
+
+# Every client call of each subset: (subset, client method)
+CLIENT_CALLS = [call[:2] for call in LISTING_CALLS] + [
+    ("appliances", "get_arrays_tags"),
+    ("appliances", "get_metrics_history"),
+    ("invoices", "get_invoices"),
 ]
 
 # The sections of the result that each subset fills
@@ -1641,7 +2181,10 @@ class TestMain:
         assert info["appliances"]["FlashArray"]["fa1"]["bandwidth (read) [MB/s]"] == 1.0
         assert info["subscriptions"]["sub1"]["org_name"] == "ACME"
         assert info["subscription_licenses"]["lic1"]["pre_ratio"]["data"] == 3.45
-        assert info["contracts"]["fa1"] == {"contract_state": "Expired"}
+        assert info["contracts"]["fa1"] == {
+            "contract_state": "Expired",
+            "contract_found": False,
+        }
         json.dumps(info)
         module.warn.assert_called_once()
         assert "invoices" in module.warn.call_args[0][0]
@@ -1706,8 +2249,8 @@ class TestMain:
             pure1_info={
                 "default": MINIMUM_SECTION,
                 "contracts": {
-                    "fa1": {"contract_state": "Expired"},
-                    "fb1": {"contract_state": "Expired"},
+                    "fa1": {"contract_state": "Expired", "contract_found": False},
+                    "fb1": {"contract_state": "Expired", "contract_found": False},
                 },
             },
         )
@@ -1717,11 +2260,9 @@ class TestMain:
 
         module = run_main(pure1_info, gather_subset=["minimum", "volumes"])
 
-        # The wording is the one the module has (D037)
         module.fail_json.assert_called_once_with(
-            msg="value must gather_subset must be one or more of: all,minimum,"
-            "appliances,subscriptions,contracts,environmental,invoices, "
-            "got: minimum,volumes"
+            msg="gather_subset must be one or more of: all, minimum, appliances, "
+            "subscriptions, contracts, environmental, invoices, got: minimum, volumes"
         )
         module.exit_json.assert_not_called()
         # nothing was collected: the one call is the check of get_pure1
@@ -1789,3 +2330,278 @@ class TestMain:
             "Failed to collect the invoices subset, the section is returned "
             "empty. Status code: 500. Error: Internal server error"
         )
+
+    @pytest.mark.parametrize("subset, method", CLIENT_CALLS)
+    def test_raised_error_on_a_client_call_fails_the_task(
+        self, pure1_client, subset, method
+    ):
+        client = self._client(pure1_client)
+        if method == "get_arrays":
+            # the first call is the check of get_pure1, which fails by itself
+            client.get_arrays.side_effect = [valid_response(), PureError("boom")]
+        else:
+            getattr(client, method).side_effect = PureError("boom")
+
+        module = run_main(pure1_info, gather_subset=[subset])
+
+        module.fail_json.assert_called_once_with(
+            msg="Failed to collect the {0} subset. PureError: boom".format(subset)
+        )
+        module.exit_json.assert_not_called()
+        module.warn.assert_not_called()
+
+    def test_main_uses_every_generate_function(self):
+        used = pure1_info.main.__code__.co_names
+        functions = [name for name in vars(pure1_info) if name.startswith("generate_")]
+
+        assert len(functions) == 7
+        assert [name for name in functions if name not in used] == []
+
+    def test_raised_error_in_one_subset_of_all_fails_the_task(self, pure1_client):
+        client = self._client(pure1_client)
+        client.get_invoices.side_effect = ProtocolError("Connection aborted.")
+
+        module = run_main(pure1_info, gather_subset=["all"])
+
+        module.fail_json.assert_called_once_with(
+            msg="Failed to collect the invoices subset. "
+            "ProtocolError: Connection aborted."
+        )
+        module.exit_json.assert_not_called()
+
+
+# The levels of the result whose keys are names: of arrays, subscriptions,
+# licenses, the resources of a license and invoices
+NAMED_LEVELS = [
+    ("appliances", "FlashArray"),
+    ("appliances", "FlashBlade"),
+    ("appliances", "ObjectEngine"),
+    ("subscriptions",),
+    ("subscription_licenses",),
+    ("subscription_licenses", "resources"),
+    ("contracts",),
+    ("environmental",),
+    ("invoices",),
+]
+
+# What Pure1 defines and the module returns as it is
+OPAQUE_VALUES = [("environmental", "insights", "insight_data")]
+
+# The keys whose value Pure1 leaves out for some objects, and RETURN says so
+NULL_KEYS = [
+    ("appliances", "FlashArray", "tags", "org_id"),
+    ("appliances", "FlashBlade", "tags", "org_id"),
+    ("appliances", "ObjectEngine", "tags", "org_id"),
+    ("subscriptions", "partner_name"),
+    ("subscription_licenses", "marketplace_partner"),
+    ("subscription_licenses", "resources", "resource_type"),
+    ("subscription_licenses", "resources", "fqdn"),
+    ("subscription_licenses", "resources", "usage", "data"),
+    ("environmental", "assessment", "array_total_load"),
+]
+
+
+def _returned_keys(value, path=(), named=True):
+    """Return the path of every key of a result, the names in it left out"""
+    keys = set()
+    if isinstance(value, list):
+        for entry in value:
+            keys |= _returned_keys(entry, path, named)
+    elif isinstance(value, dict) and path not in OPAQUE_VALUES:
+        if named and path in NAMED_LEVELS:
+            # one entry for each name: the keys of the entries count
+            for entry in value.values():
+                keys |= _returned_keys(entry, path, False)
+        else:
+            for key, entry in value.items():
+                keys.add(path + (key,))
+                keys |= _returned_keys(entry, path + (key,))
+    return keys
+
+
+def _documented_keys(contains, path=()):
+    """Return the path of every key under a contains block of RETURN"""
+    keys = set()
+    for key, entry in contains.items():
+        keys.add(path + (key,))
+        keys |= _documented_keys(entry.get("contains", {}), path + (key,))
+    return keys
+
+
+def _described_keys(sections):
+    """Return the path of every key that RETURN names in a description
+
+    The keys of the performance figures are no identifiers. validate-modules
+    refuses such a key under contains, so the description of the appliance
+    type names them, each between single quotes.
+    """
+    keys = set()
+    for kind in ("FlashArray", "FlashBlade"):
+        description = sections["appliances"]["contains"][kind]["description"]
+        for key in re.findall(r"'([^']+)'", " ".join(description)):
+            keys.add(("appliances", kind, key))
+    return keys
+
+
+class TestDocumentation:
+    """DOCUMENTATION, EXAMPLES and RETURN against the code."""
+
+    def _client(self, client):
+        """Answer every call with objects that have each field the module reads"""
+        client = TestMain()._client(client)
+        arrays = [
+            _array("fa1", "Purity//FA"),
+            _array("fb1", "Purity//FB"),
+            _array("oe1", "Elasticity"),
+        ]
+        client.get_arrays.side_effect = lambda **kwargs: valid_response(arrays)
+        client.get_subscription_licenses.return_value = valid_response(
+            [
+                TestGenerateSubscriptionLicensesDict()._license(
+                    site_address=sdk_model("BaseAddress", city="Example City"),
+                    pre_ratio=sdk_model(
+                        "SubscriptionLicensePreRatio", data=3.45, unit=""
+                    ),
+                )
+            ]
+        )
+        client.get_arrays_support_contracts.side_effect = (
+            lambda **kwargs: valid_response(
+                [
+                    sdk_model(
+                        "SupportContract", start_date=JAN_2021_MS, end_date=FEB_2021_MS
+                    )
+                ]
+            )
+        )
+        TestGenerateEsgDict()._client(client)
+        client.get_invoices.return_value = valid_response(
+            [TestGenerateInvoicesDict()._invoice()]
+        )
+        return client
+
+    def test_return_documents_the_keys_of_the_result(self, pure1_client):
+        self._client(pure1_client)
+
+        module = run_main(pure1_info, gather_subset=["all"])
+
+        module.warn.assert_not_called()
+        returned = _returned_keys(module.exit_json.call_args[1]["pure1_info"])
+        sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
+        documented = _documented_keys(sections) | _described_keys(sections)
+        assert sorted(returned - documented) == []
+        assert sorted(documented - returned) == []
+
+    def test_samples_of_return_hold_documented_keys(self):
+        sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
+        samples = {name: section["sample"] for name, section in sections.items()}
+        documented = _documented_keys(sections) | _described_keys(sections)
+
+        json.dumps(samples)
+        assert sorted(_returned_keys(samples) - documented) == []
+
+    def test_every_key_under_contains_can_be_read_with_dot_notation(self):
+        sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
+
+        for path in _documented_keys(sections):
+            assert path[-1].isidentifier(), path
+        assert len(_described_keys(sections)) == 13
+
+    def test_sample_of_a_tax_is_a_ratio_the_sdk_model_can_hold(self):
+        sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
+        line = sections["invoices"]["sample"]["1234567"]["lines"][0]
+        documented = sections["invoices"]["contains"]["lines"]["contains"]
+
+        # Pure1 gives the tax rate as a fraction of 1, the SDK model refuses more
+        sdk_model("Tax", percentage=line["tax_percentage"], amount=line["tax_amount"])
+        assert line["tax_amount"] == pytest.approx(
+            line["amount"] * line["tax_percentage"]
+        )
+        description = " ".join(documented["tax_percentage"]["description"])
+        assert "fraction of 1" in description
+        assert "in percent" not in description
+
+    def test_sample_location_names_no_real_place(self):
+        sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
+        sample = sections["subscription_licenses"]["sample"]["license1"]
+
+        assert sample["location"] == {
+            "city": "Example City",
+            "state": "EX",
+            "country": "EXAMPLE COUNTRY",
+        }
+
+    @pytest.mark.parametrize("path", NULL_KEYS, ids=".".join)
+    def test_return_says_which_values_come_back_null(self, path):
+        entry = yaml.safe_load(pure1_info.RETURN)["pure1_info"]
+        for key in path:
+            entry = entry["contains"][key]
+        description = entry["description"]
+        if isinstance(description, list):
+            description = " ".join(description)
+
+        assert "null when Pure1 has none" in description
+
+    def test_return_says_what_a_line_without_components_holds(self, pure1_client):
+        pure1_client.get_invoices.return_value = valid_response(
+            [
+                sdk_model(
+                    "Invoice",
+                    id="INV-001",
+                    lines=[
+                        sdk_model("InvoiceLine", item="FA-X70"),
+                        sdk_model("InvoiceLine", item="Shelf", components=[]),
+                    ],
+                )
+            ]
+        )
+
+        result = generate_invoices_dict(ansible_module(), pure1_client)
+
+        lines = result["INV-001"]["lines"]
+        assert [line["components"] for line in lines] == [None, []]
+        sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
+        documented = sections["invoices"]["contains"]["lines"]["contains"]
+        assert (
+            "null or empty when it has none" in documented["components"]["description"]
+        )
+
+    def test_new_return_key_says_when_it_was_added(self):
+        sections = yaml.safe_load(pure1_info.RETURN)["pure1_info"]["contains"]
+        contract_found = sections["contracts"]["contains"]["contract_found"]
+
+        assert "Added in version 1.6.0." in contract_found["description"]
+
+    def test_examples_register_at_task_level_and_read_what_was_registered(self):
+        tasks = yaml.safe_load(pure1_info.EXAMPLES)
+        options = set(pure1_argument_spec()) | {"gather_subset"}
+        registered = set()
+
+        for task in tasks:
+            action = set(task) - {"name", "register"}
+            if action == {"everpure.pure1.pure1_info"}:
+                assert set(task["everpure.pure1.pure1_info"] or {}) <= options
+                registered.add(task["register"])
+            else:
+                assert action == {"ansible.builtin.debug"}
+                read = re.findall(r"{{\s*(\w+)", task["ansible.builtin.debug"]["msg"])
+                assert read and set(read) <= registered
+        assert tasks[0]["everpure.pure1.pure1_info"] == {
+            "app_id": "pure1:apikey:dssf2331sd",
+            "key_file": "/home/user/private.pem",
+        }
+
+    def test_description_says_what_the_minimum_subset_returns(self):
+        documentation = yaml.safe_load(pure1_info.DOCUMENTATION)
+        description = " ".join(documentation["description"])
+        subsets = " ".join(documentation["options"]["gather_subset"]["description"])
+
+        # the minimum subset holds counts, under the key default
+        assert "data reduction" not in description
+        assert "returned under the key C(default)" in description
+        assert "returned under the key C(default)" in subsets
+        assert "arguements" not in description
+        assert "from a Pure1" not in description
+
+    def test_module_has_no_metadata_block(self):
+        assert not hasattr(pure1_info, "ANSIBLE_METADATA")
