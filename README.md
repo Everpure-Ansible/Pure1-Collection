@@ -59,10 +59,10 @@ for more details.
 
 ## Use Cases
 
-This collection can be used to report on a fleet of Everpure arrays from Pure1 and to manage array tags in Pure1, either on its own or as part of larger playbooks. For example:
-* Collect fleet-wide information from Pure1: appliances, subscriptions and subscription licenses, support contracts, invoices and environmental data
-* List the volumes, pods, drives, ports and network interfaces of the whole fleet or of a single array
-* Collect open or closed alerts of a chosen severity, for the whole fleet or for a single array
+This collection can be used to report on the Everpure arrays of a Pure1 organization and to manage array tags in Pure1, either on its own or as part of larger playbooks. For example:
+* Collect organization-wide information from Pure1: appliances, subscriptions and subscription licenses, support contracts, invoices and environmental data
+* List the volumes, pods, drives, ports and network interfaces of all appliances or of a single array
+* Collect open, closing or closed alerts of a chosen severity, for all appliances or for a single array
 * Collect historical capacity and performance metrics for volumes
 * Create, update and remove array tags in Pure1
 
@@ -70,7 +70,7 @@ This collection can be used to report on a fleet of Everpure arrays from Pure1 a
 ```yaml
 - hosts: localhost
   tasks:
-  - name: Collect information for Everpure fleet in Pure1
+  - name: Collect information for all Everpure appliances in Pure1
     everpure.pure1.pure1_info:
       gather_subset: all
       app_id: <Pure1 API Application ID>
@@ -112,7 +112,7 @@ Per-release notes can be found on the
 - pure1_alerts - Get alerts from Pure1
 - pure1_array_tags - Manage array tags for managed devices in Pure1
 - pure1_drives - Get array drives information from Pure1
-- pure1_info - Get information on fleet configuration
+- pure1_info - Collect information from Pure1
 - pure1_network_interfaces - Get array network interface details from Pure1 (deprecated, to be removed in version 2.0.0: use pure1_nics instead)
 - pure1_nics - Get network interface information from Pure1
 - pure1_pods - Get FlashArray pod information from Pure1
