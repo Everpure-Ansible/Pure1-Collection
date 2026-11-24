@@ -8,6 +8,7 @@ from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 
 import pytest
+from pypureclient import ErrorResponse, PureError
 
 from plugins.modules import pure1_drives
 from plugins.modules.pure1_drives import generate_drives_dict
@@ -18,6 +19,15 @@ from tests.unit.conftest import (
     sdk_model,
     valid_response,
 )
+
+DRIVE0 = {
+    "drive0": {
+        "capacity": 1099511627776,
+        "protocol": "NVMe",
+        "status": "healthy",
+        "type": "SSD",
+    }
+}
 
 
 def _make_drive(array_name="array1", **overrides):
@@ -31,6 +41,34 @@ def _make_drive(array_name="array1", **overrides):
     )
     fields.update(overrides)
     return sdk_model("Drive", **fields)
+
+
+def _drive_without_name():
+    return sdk_model("Drive", arrays=[sdk_model("DriveArrayStatus", name="array1")])
+
+
+def _drive_without_arrays():
+    return sdk_model("Drive", name="drive1")
+
+
+def _drive_with_empty_arrays():
+    # The SDK reads a response without validating it, so an empty list
+    # arrives as it is; the constructor of the model refuses one
+    drive = _make_drive(name="drive1")
+    del drive.arrays[:]
+    return drive
+
+
+def _drive_with_null_array():
+    drive = _make_drive(name="drive1")
+    drive.arrays[0] = None
+    return drive
+
+
+def _drive_on_array_without_name():
+    return _make_drive(
+        name="drive1", arrays=[sdk_model("DriveArrayStatus", fqdn="a.example.com")]
+    )
 
 
 class TestGenerateDrivesDict:
@@ -62,18 +100,39 @@ class TestGenerateDrivesDict:
         pure1_client.get_drives.assert_called_once_with(filter="arrays.name='myarray'")
         assert "myarray" in result
 
+    @pytest.mark.parametrize(
+        "array, expected",
+        [
+            pytest.param("o'brien", "arrays.name='o\\'brien'", id="single quote"),
+            pytest.param("back\\slash", "arrays.name='back\\\\slash'", id="backslash"),
+        ],
+    )
+    def test_array_name_is_escaped_in_the_filter(self, pure1_client, array, expected):
+        module = ansible_module(array=array)
+        pure1_client.get_drives.return_value = valid_response([])
+
+        result = generate_drives_dict(module, pure1_client)
+
+        pure1_client.get_drives.assert_called_once_with(filter=expected)
+        # the warning shows the name as the task gave it
+        assert result == {}
+        module.warn.assert_called_once_with(
+            "No drives information available for array " + array
+        )
+
     def test_array_filter_no_results_warns_and_exits(self, pure1_client):
+        """The warning stays; main() exits with what is returned here."""
         module = ansible_module(array="myarray")
         pure1_client.get_drives.return_value = valid_response([])
 
-        with pytest.raises(SystemExit):
-            generate_drives_dict(module, pure1_client)
+        result = generate_drives_dict(module, pure1_client)
 
+        assert result == {}
         module.warn.assert_called_once()
         assert module.warn.call_args[0][0] == (
             "No drives information available for array myarray"
         )
-        module.exit_json.assert_called_once_with(changed=False)
+        module.exit_json.assert_not_called()
 
     def test_multiple_drives_same_array_grouped(self, pure1_client):
         pure1_client.get_drives.return_value = valid_response(
@@ -120,6 +179,76 @@ class TestGenerateDrivesDict:
         assert [list(drive) for drive in result["array1"]] == [["drive0"], ["drive2"]]
         assert [list(drive) for drive in result["array2"]] == [["drive1"]]
         assert result["array2"][0]["drive1"]["status"] == "failed"
+
+    def test_drive_with_two_array_references_is_filed_under_the_first(
+        self, pure1_client
+    ):
+        drive = _make_drive(
+            arrays=[
+                sdk_model("DriveArrayStatus", name="array1"),
+                sdk_model("DriveArrayStatus", name="array2"),
+            ]
+        )
+        pure1_client.get_drives.return_value = valid_response([drive])
+
+        result = generate_drives_dict(ansible_module(array=None), pure1_client)
+
+        assert result == {"array1": [DRIVE0]}
+
+    @pytest.mark.parametrize(
+        "array, name",
+        [
+            pytest.param("array1", "", id="empty name"),
+            pytest.param("", "drive0", id="empty array name"),
+        ],
+    )
+    def test_drive_with_an_empty_name_is_filed(self, pure1_client, array, name):
+        """Only a name that Pure1 did not send leaves a drive out."""
+        module = ansible_module(array=None)
+        pure1_client.get_drives.return_value = valid_response(
+            [_make_drive(array, name=name)]
+        )
+
+        result = generate_drives_dict(module, pure1_client)
+
+        assert result == {array: [{name: DRIVE0["drive0"]}]}
+        module.warn.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "broken",
+        [
+            pytest.param(_drive_without_name, id="no name"),
+            pytest.param(_drive_without_arrays, id="no arrays"),
+            pytest.param(_drive_with_empty_arrays, id="empty arrays"),
+            pytest.param(_drive_with_null_array, id="null array"),
+            pytest.param(_drive_on_array_without_name, id="array without name"),
+        ],
+    )
+    def test_drive_that_cannot_be_filed_is_left_out(self, pure1_client, broken):
+        module = ansible_module(array=None)
+        pure1_client.get_drives.return_value = valid_response([broken(), _make_drive()])
+
+        result = generate_drives_dict(module, pure1_client)
+
+        assert result == {"array1": [DRIVE0]}
+        module.warn.assert_called_once_with(
+            "Drives that Pure1 returned without a name or without an array "
+            "are left out of the result: 1"
+        )
+
+    def test_drives_left_out_give_one_warning(self, pure1_client):
+        module = ansible_module(array="array1")
+        pure1_client.get_drives.return_value = valid_response(
+            [_drive_without_name(), _make_drive(), _drive_without_arrays()]
+        )
+
+        result = generate_drives_dict(module, pure1_client)
+
+        assert result == {"array1": [DRIVE0]}
+        module.warn.assert_called_once_with(
+            "Drives that Pure1 returned without a name or without an array "
+            "are left out of the result: 2"
+        )
 
 
 class TestPure1DrivesMain:
@@ -181,11 +310,20 @@ class TestPure1DrivesMain:
             changed=False, pure1_drives={"drives": {}}
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AttributeError,
-        reason="D011 pure1_drives reads .items of an error answer, which has none",
-    )
+    def test_named_array_without_drives_gives_an_empty_result(self, pure1_client):
+        pure1_client.get_drives.return_value = valid_response([])
+
+        module = run_main(pure1_drives, array="myarray")
+
+        pure1_client.get_drives.assert_called_once_with(filter="arrays.name='myarray'")
+        module.fail_json.assert_not_called()
+        module.warn.assert_called_once_with(
+            "No drives information available for array myarray"
+        )
+        module.exit_json.assert_called_once_with(
+            changed=False, pure1_drives={"drives": {}}
+        )
+
     def test_pure1_error_answer_fails_the_task(self, pure1_client):
         pure1_client.get_drives.return_value = error_response(403, "Access denied")
 
@@ -197,11 +335,6 @@ class TestPure1DrivesMain:
         assert "403" in message
         assert "Access denied" in message
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="D062 an API error for a named array ends ok with a warning",
-    )
     def test_api_error_for_named_array_fails(self, pure1_client):
         pure1_client.get_drives.return_value = error_response(403, "Access denied")
 
@@ -209,4 +342,55 @@ class TestPure1DrivesMain:
 
         module.fail_json.assert_called_once()
         assert "Access denied" in module.fail_json.call_args[1]["msg"]
+        module.warn.assert_not_called()
+
+    @pytest.mark.parametrize("params", [{}, {"array": "myarray"}], ids=["all", "named"])
+    @pytest.mark.parametrize(
+        "attribute, answer, expected",
+        [
+            pytest.param(
+                "return_value",
+                error_response(403, "Access denied"),
+                "Pure1 request get_drives failed (HTTP 403): Access denied",
+                id="error answer",
+            ),
+            pytest.param(
+                "return_value",
+                error_response(
+                    400, "Illegal filter format", "Unexpected input at character 16"
+                ),
+                "Pure1 request get_drives failed (HTTP 400): Illegal filter "
+                "format: Unexpected input at character 16",
+                id="error answer with context",
+            ),
+            pytest.param(
+                "return_value",
+                ErrorResponse(503, [], {}),
+                "Pure1 request get_drives failed (HTTP 503): Service Unavailable",
+                id="error answer without message",
+            ),
+            pytest.param(
+                "side_effect",
+                PureError("token refused"),
+                "Pure1 request get_drives failed: PureError: token refused",
+                id="PureError",
+            ),
+            pytest.param(
+                "side_effect",
+                TimeoutError("The read operation timed out"),
+                "Pure1 request get_drives failed: "
+                "TimeoutError: The read operation timed out",
+                id="transport error",
+            ),
+        ],
+    )
+    def test_failed_request_fails_the_task_with_one_line(
+        self, pure1_client, params, attribute, answer, expected
+    ):
+        setattr(pure1_client.get_drives, attribute, answer)
+
+        module = run_main(pure1_drives, **params)
+
+        module.fail_json.assert_called_once_with(msg=expected)
+        module.exit_json.assert_not_called()
         module.warn.assert_not_called()

@@ -8,6 +8,7 @@ from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 
 import pytest
+from pypureclient import ErrorResponse, PureError
 
 from plugins.modules import pure1_network_interfaces
 from tests.unit.conftest import error_response, run_main, sdk_model, valid_response
@@ -53,16 +54,33 @@ class TestPure1NetworkInterfacesMain:
         assert port["services"] == ["management"]
         assert port["enabled"] is True
 
+    @pytest.mark.parametrize(
+        "name, expected",
+        [
+            pytest.param("o'brien", "arrays.name='o\\'brien'", id="single quote"),
+            pytest.param("back\\slash", "arrays.name='back\\\\slash'", id="backslash"),
+        ],
+    )
+    def test_array_name_is_escaped_in_the_filter(self, pure1_client, name, expected):
+        pure1_client.get_network_interfaces.return_value = valid_response(
+            [_make_iface()]
+        )
+
+        module = run_main(pure1_network_interfaces, name=name)
+
+        pure1_client.get_network_interfaces.assert_called_once_with(filter=expected)
+        # the result is keyed by the name as the task gave it
+        assert list(module.exit_json.call_args[1]["network_info"]) == [name]
+
     def test_no_interfaces_fails(self, pure1_client):
         pure1_client.get_network_interfaces.return_value = valid_response([])
 
         module = run_main(pure1_network_interfaces, name="foo")
 
         module.fail_json.assert_called_once()
-        # the message, misspelt as the module has it, shows that the module
-        # failed and not get_pure1 before it
+        # the message shows that the module failed and not get_pure1 before it
         assert module.fail_json.call_args[1]["msg"] == (
-            "Failed to get netowrk interfaces information. Check provided array name."
+            "Failed to get network interfaces information. Check provided array name."
         )
         module.exit_json.assert_not_called()
 
@@ -118,6 +136,79 @@ class TestPure1NetworkInterfacesMain:
             "speed": 0,
         }
 
+    def test_interface_with_only_a_name_gets_every_default(self, pure1_client):
+        iface = sdk_model(
+            "NetworkInterface",
+            name="data-vip1",
+            arrays=[sdk_model("FixedReferenceFqdn", name="foo")],
+        )
+        pure1_client.get_network_interfaces.return_value = valid_response([iface])
+
+        module = run_main(pure1_network_interfaces, name="foo")
+
+        module.warn.assert_not_called()
+        module.exit_json.assert_called_once_with(
+            changed=False,
+            network_info={
+                "foo": {
+                    "data-vip1": {
+                        "services": None,
+                        "enabled": None,
+                        "gateway": "",
+                        "mtu": "",
+                        "netmask": "",
+                        "address": "",
+                        "subinterfaces": None,
+                        "mac_address": "",
+                        "speed": 0,
+                    }
+                }
+            },
+        )
+
+    @pytest.mark.parametrize("missing", ["services", "enabled", "subinterfaces"])
+    def test_interface_without_one_field_gets_null_for_it(self, pure1_client, missing):
+        iface = _make_iface(**{missing: None})
+        pure1_client.get_network_interfaces.return_value = valid_response([iface])
+
+        module = run_main(pure1_network_interfaces, name="foo")
+
+        row = module.exit_json.call_args[1]["network_info"]["foo"]["ct0.eth0"]
+        expected = {"services": ["management"], "enabled": True, "subinterfaces": []}
+        expected[missing] = None
+        assert {key: row[key] for key in expected} == expected
+
+    def test_interface_without_name_is_left_out(self, pure1_client):
+        nameless = sdk_model(
+            "NetworkInterface", arrays=[sdk_model("FixedReferenceFqdn", name="foo")]
+        )
+        pure1_client.get_network_interfaces.return_value = valid_response(
+            [nameless, _make_iface(), nameless]
+        )
+
+        module = run_main(pure1_network_interfaces, name="foo")
+
+        module.warn.assert_called_once_with(
+            "Network interfaces that Pure1 returned without a name are left "
+            "out of the result: 2"
+        )
+        network_info = module.exit_json.call_args[1]["network_info"]
+        assert list(network_info) == ["foo"]
+        assert list(network_info["foo"]) == ["ct0.eth0"]
+
+    def test_interface_with_an_empty_name_is_listed(self, pure1_client):
+        """Only a name that Pure1 did not send leaves an interface out."""
+        pure1_client.get_network_interfaces.return_value = valid_response(
+            [_make_iface(name="")]
+        )
+
+        module = run_main(pure1_network_interfaces, name="foo")
+
+        module.warn.assert_not_called()
+        network_info = module.exit_json.call_args[1]["network_info"]
+        assert list(network_info["foo"]) == [""]
+        assert network_info["foo"][""]["address"] == "10.0.0.10"
+
     def test_speed_is_rounded_to_whole_gigabits(self, pure1_client):
         pure1_client.get_network_interfaces.return_value = valid_response(
             [_make_iface(speed=9600000000)]
@@ -165,12 +256,6 @@ class TestPure1NetworkInterfacesMain:
         module.fail_json.assert_called_once_with(msg="missing required arguments: name")
         pure1_client.get_network_interfaces.assert_not_called()
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AttributeError,
-        reason="D011 pure1_network_interfaces reads .items of an error answer, "
-        "which has none",
-    )
     def test_pure1_error_answer_fails_the_task(self, pure1_client):
         pure1_client.get_network_interfaces.return_value = error_response(
             403, "Access denied"
@@ -183,3 +268,56 @@ class TestPure1NetworkInterfacesMain:
         message = module.fail_json.call_args[1]["msg"]
         assert "403" in message
         assert "Access denied" in message
+
+    @pytest.mark.parametrize(
+        "attribute, answer, expected",
+        [
+            pytest.param(
+                "return_value",
+                error_response(403, "Access denied"),
+                "Pure1 request get_network_interfaces failed (HTTP 403): "
+                "Access denied",
+                id="error answer",
+            ),
+            pytest.param(
+                "return_value",
+                error_response(
+                    400, "Illegal filter format", "Unexpected input at character 16"
+                ),
+                "Pure1 request get_network_interfaces failed (HTTP 400): Illegal "
+                "filter format: Unexpected input at character 16",
+                id="error answer with context",
+            ),
+            pytest.param(
+                "return_value",
+                ErrorResponse(503, [], {}),
+                "Pure1 request get_network_interfaces failed (HTTP 503): "
+                "Service Unavailable",
+                id="error answer without message",
+            ),
+            pytest.param(
+                "side_effect",
+                PureError("token refused"),
+                "Pure1 request get_network_interfaces failed: "
+                "PureError: token refused",
+                id="PureError",
+            ),
+            pytest.param(
+                "side_effect",
+                TimeoutError("The read operation timed out"),
+                "Pure1 request get_network_interfaces failed: "
+                "TimeoutError: The read operation timed out",
+                id="transport error",
+            ),
+        ],
+    )
+    def test_failed_request_fails_the_task_with_one_line(
+        self, pure1_client, attribute, answer, expected
+    ):
+        setattr(pure1_client.get_network_interfaces, attribute, answer)
+
+        module = run_main(pure1_network_interfaces, name="foo")
+
+        module.fail_json.assert_called_once_with(msg=expected)
+        module.exit_json.assert_not_called()
+        module.warn.assert_not_called()
