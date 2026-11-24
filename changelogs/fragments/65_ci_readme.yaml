@@ -1,0 +1,2 @@
+deprecated_features:
+  - "pure1_network_interfaces - the module is deprecated and will be removed in version 2.0.0; use ``pure1_nics`` instead."

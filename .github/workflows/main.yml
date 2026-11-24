@@ -59,7 +59,7 @@ jobs:
       run: |
         pwd
         mkdir -p ansible_collections/everpure/pure1
-        rsync -av . ansible_collections/everpure/pure1 --exclude ansible_collection/everpure/pure1
+        rsync -av . ansible_collections/everpure/pure1 --exclude /ansible_collections
         cd ansible_collections/everpure/pure1
         ansible-test sanity -v --color --python ${{ matrix.python-version }} --docker
 
