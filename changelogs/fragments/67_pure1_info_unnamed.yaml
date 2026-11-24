@@ -1,0 +1,2 @@
+bugfixes:
+  - "pure1_info - an array, subscription, license, license resource or invoice that Pure1 returns without its name or number, and a tag without its key, is now left out with a warning instead of a traceback; a tag without a value has a null value."

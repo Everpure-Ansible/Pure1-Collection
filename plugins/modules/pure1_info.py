@@ -69,6 +69,10 @@ pure1_info:
     - A section that the API key is not permitted to read (status code 403) is returned
       empty with a warning. The C(invoices) section is returned empty with a warning
       for any error answer.
+    - An array, subscription, license or resource of a license that Pure1 returns
+      without a name, an invoice without a number, a tag without a key and an
+      insight without an array name are left out of the sections that list them,
+      with a warning that counts them.
   returned: always
   type: dict
   contains:
@@ -171,7 +175,7 @@ pure1_info:
                   description: Key of the tag.
                   type: str
                 value:
-                  description: Value of the tag.
+                  description: Value of the tag, null when Pure1 has none.
                   type: str
                 org_id:
                   description: ID of the organization of the tag, null when Pure1 has none.
@@ -214,7 +218,7 @@ pure1_info:
                   description: Key of the tag.
                   type: str
                 value:
-                  description: Value of the tag.
+                  description: Value of the tag, null when Pure1 has none.
                   type: str
                 org_id:
                   description: ID of the organization of the tag, null when Pure1 has none.
@@ -250,7 +254,7 @@ pure1_info:
                   description: Key of the tag.
                   type: str
                 value:
-                  description: Value of the tag.
+                  description: Value of the tag, null when Pure1 has none.
                   type: str
                 org_id:
                   description: ID of the organization of the tag, null when Pure1 has none.
@@ -886,6 +890,19 @@ def current_metric_dict(metric):
     }
 
 
+def warn_left_out(module, what, subset, count):
+    """Warn of the objects that a subset left out, if there are any
+
+    what names the objects and the field that Pure1 sent them without: an
+    object without the field that it is listed under cannot be reported.
+    A caller that has no module gets no warning.
+    """
+    if count and module is not None:
+        module.warn(
+            "{0} were left out of the {1} subset: {2}.".format(what, subset, count)
+        )
+
+
 def generate_default_dict(pure_1):
     default_info = {}
     fb_count = fa_count = os_count = 0
@@ -918,12 +935,20 @@ def generate_default_dict(pure_1):
     return default_info
 
 
-def generate_subscription_licenses_dict(pure_1):
+def generate_subscription_licenses_dict(pure_1, module=None):
+    """Return the licenses of the subscriptions by name
+
+    module is warned of the licenses and resources that are left out.
+    """
     licenses_info = {}
+    unnamed = unnamed_resources = 0
     licenses = list(checked(pure_1.get_subscription_licenses()).items)
     if licenses:
         for license in range(0, len(licenses)):
-            name = licenses[license].name
+            name = getattr(licenses[license], "name", None)
+            if name is None:
+                unnamed += 1
+                continue
             location = plain_dict(
                 getattr(licenses[license], "site_address", None),
                 ("city", "state", "country"),
@@ -967,7 +992,10 @@ def generate_subscription_licenses_dict(pure_1):
             }
             resources = getattr(licenses[license], "resources", None) or []
             for resource in range(0, len(resources)):
-                res_name = resources[resource].name
+                res_name = getattr(resources[resource], "name", None)
+                if res_name is None:
+                    unnamed_resources += 1
+                    continue
                 licenses_info[name]["resources"][res_name] = {
                     "resource_type": getattr(
                         resources[resource], "resource_type", None
@@ -980,15 +1008,27 @@ def generate_subscription_licenses_dict(pure_1):
                         getattr(resources[resource], "usage", None)
                     ),
                 }
+    warn_left_out(module, "Licenses without a name", "subscriptions", unnamed)
+    warn_left_out(
+        module, "License resources without a name", "subscriptions", unnamed_resources
+    )
     return licenses_info
 
 
-def generate_subscriptions_dict(pure_1):
+def generate_subscriptions_dict(pure_1, module=None):
+    """Return the subscriptions by name
+
+    module is warned of the subscriptions that are left out.
+    """
     subscriptions_info = {}
+    unnamed = 0
     subscriptions = list(checked(pure_1.get_subscriptions()).items)
     if subscriptions:
         for subscription in range(0, len(subscriptions)):
-            name = subscriptions[subscription].name
+            name = getattr(subscriptions[subscription], "name", None)
+            if name is None:
+                unnamed += 1
+                continue
             subscriptions_info[name] = {
                 "start_date": format_utc(
                     getattr(subscriptions[subscription], "start_date", None)
@@ -1010,15 +1050,20 @@ def generate_subscriptions_dict(pure_1):
                     subscriptions[subscription], "subscription_term", None
                 ),
             }
+    warn_left_out(module, "Subscriptions without a name", "subscriptions", unnamed)
     return subscriptions_info
 
 
 def generate_esg_dict(module, pure_1):
     esg_info = {}
     current_date = int(time.time() * 1000)
+    unnamed_arrays = 0
     appliances = list(checked(pure_1.get_assessment_sustainability_arrays()).items)
     for appliance in range(0, len(appliances)):
-        name = appliances[appliance].name
+        name = getattr(appliances[appliance], "name", None)
+        if name is None:
+            unnamed_arrays += 1
+            continue
         status = getattr(appliances[appliance], "reporting_status", None)
         esg_info[name] = {
             "insights": [],
@@ -1108,6 +1153,7 @@ def generate_esg_dict(module, pure_1):
                 "insight_data": getattr(insights[insight], "additional_data", None),
             }
         )
+    warn_left_out(module, "Arrays without a name", "environmental", unnamed_arrays)
     if unnamed:
         module.warn(
             "Insights without an array name were left out of the "
@@ -1116,14 +1162,23 @@ def generate_esg_dict(module, pure_1):
     return esg_info
 
 
-def generate_contract_dict(pure_1):
+def generate_contract_dict(pure_1, module=None):
+    """Return the support contract of each array by array name
+
+    module is warned of the arrays that are left out.
+    """
     contract_info = {}
     grace_period = 2592000000  # 30 days in ms
     current_date = int(time.time() * 1000)
+    unnamed = 0
     appliances = list(checked(pure_1.get_arrays()).items)
     for appliance in range(0, len(appliances)):
         contract_state = "Expired"
-        name = appliances[appliance].name
+        name = getattr(appliances[appliance], "name", None)
+        if name is None:
+            # The contract is asked for by array name
+            unnamed += 1
+            continue
         contract_info[name] = {}
         contract_data = list(
             checked(
@@ -1146,6 +1201,7 @@ def generate_contract_dict(pure_1):
                     contract_state = "Grace Period"
         contract_info[name]["contract_state"] = contract_state
         contract_info[name]["contract_found"] = bool(contract_data)
+    warn_left_out(module, "Arrays without a name", "contracts", unnamed)
     return contract_info
 
 
@@ -1153,9 +1209,13 @@ def generate_invoices_dict(module, pure_1):
     invoices_info = {}
     res = pure_1.get_invoices()
     if res.status_code == 200:
+        unnamed = 0
         invoices = list(res.items)
         for invoice in range(0, len(invoices)):
-            name = invoices[invoice].id
+            name = getattr(invoices[invoice], "id", None)
+            if name is None:
+                unnamed += 1
+                continue
             subscription = getattr(invoices[invoice], "subscription", None)
 
             invoices_info[name] = {
@@ -1184,8 +1244,8 @@ def generate_invoices_dict(module, pure_1):
             }
             lines = getattr(invoices[invoice], "lines", None) or []
             for line in range(0, len(lines)):
-                tax = getattr(invoices[invoice].lines[line], "tax", None)
-                components = getattr(invoices[invoice].lines[line], "components", None)
+                tax = getattr(lines[line], "tax", None)
+                components = getattr(lines[line], "components", None)
                 if components:
                     components = [
                         {
@@ -1197,24 +1257,18 @@ def generate_invoices_dict(module, pure_1):
                     ]
                 invoices_info[name]["lines"].append(
                     {
-                        "item": getattr(invoices[invoice].lines[line], "item", None),
-                        "quantity": getattr(
-                            invoices[invoice].lines[line], "quantity", 0
-                        ),
-                        "description": getattr(
-                            invoices[invoice].lines[line], "description", None
-                        ),
+                        "item": getattr(lines[line], "item", None),
+                        "quantity": getattr(lines[line], "quantity", 0),
+                        "description": getattr(lines[line], "description", None),
                         "start_date": format_utc_date(
-                            getattr(invoices[invoice].lines[line], "start_date", None)
+                            getattr(lines[line], "start_date", None)
                         ),
                         "end_date": format_utc_date(
-                            getattr(invoices[invoice].lines[line], "end_date", None)
+                            getattr(lines[line], "end_date", None)
                         ),
                         "components": components,
-                        "unit_price": getattr(
-                            invoices[invoice].lines[line], "unit_price", 0
-                        ),
-                        "amount": getattr(invoices[invoice].lines[line], "amount", 0),
+                        "unit_price": getattr(lines[line], "unit_price", 0),
+                        "amount": getattr(lines[line], "amount", 0),
                         "tax_percentage": (
                             getattr(tax, "percentage", 0) if tax else None
                         ),
@@ -1224,6 +1278,7 @@ def generate_invoices_dict(module, pure_1):
                         ),
                     }
                 )
+        warn_left_out(module, "Invoices without a number", "invoices", unnamed)
     else:
         # An error answer returns the section empty, it does not fail the task
         module.warn(
@@ -1261,39 +1316,52 @@ def get_latest_metric(module, pure_1, name, metric):
 
 
 def get_tags(module, pure_1, name):
-    """Return the tags of an array, none with a warning if they are refused"""
+    """Return the tags of an array and the number left out for having no key
+
+    No tags with a warning if they are refused.
+    """
     res = pure_1.get_arrays_tags(resource_names=[name])
     if res.status_code != 200:
         module.warn("Tags not collected for {0}. {1}".format(name, response_error(res)))
-        return []
-    tags = list(res.items)
-    return [
-        {
-            "key": tags[tag].key,
-            "value": tags[tag].value,
-            "org_id": getattr(tags[tag], "tag_organization_id", None),
-            "namespace": getattr(tags[tag], "namespace", None),
-        }
-        for tag in range(0, len(tags))
-    ]
+        return [], 0
+    tags = []
+    unkeyed = 0
+    for tag in list(res.items):
+        key = getattr(tag, "key", None)
+        if key is None:
+            unkeyed += 1
+            continue
+        tags.append(
+            {
+                "key": key,
+                "value": getattr(tag, "value", None),
+                "org_id": getattr(tag, "tag_organization_id", None),
+                "namespace": getattr(tag, "namespace", None),
+            }
+        )
+    return tags, unkeyed
 
 
 def generate_appliances_dict(module, pure_1):
     names_info = {"FlashArray": {}, "FlashBlade": {}, "ObjectEngine": {}}
+    unnamed = unkeyed_tags = 0
     appliances = list(checked(pure_1.get_arrays()).items)
     for appliance in range(0, len(appliances)):
-        name = appliances[appliance].name
-        try:
-            fqdn = appliances[appliance].fqdn
-        except AttributeError:
-            fqdn = ""
+        name = getattr(appliances[appliance], "name", None)
+        if name is None:
+            # Tags and metrics are asked for by array name
+            unnamed += 1
+            continue
+        fqdn = getattr(appliances[appliance], "fqdn", "")
         array_os = getattr(appliances[appliance], "os", None)
         if array_os in ["Purity//FA", "Purity"]:
+            tags, unkeyed = get_tags(module, pure_1, name)
+            unkeyed_tags += unkeyed
             names_info["FlashArray"][name] = {
                 "os_version": getattr(appliances[appliance], "version", None),
                 "model": getattr(appliances[appliance], "model", None),
                 "fqdn": fqdn,
-                "tags": get_tags(module, pure_1, name),
+                "tags": tags,
             }
             value = get_latest_metric(module, pure_1, name, "array_read_bandwidth")
             if value is not None:
@@ -1325,18 +1393,22 @@ def generate_appliances_dict(module, pure_1):
             if value is not None:
                 names_info["FlashArray"][name]["load [%]"] = round(value * 100, 3)
         elif array_os == "Elasticity":
+            tags, unkeyed = get_tags(module, pure_1, name)
+            unkeyed_tags += unkeyed
             names_info["ObjectEngine"][name] = {
                 "os_version": getattr(appliances[appliance], "version", None),
                 "model": getattr(appliances[appliance], "model", None),
                 "fqdn": fqdn,
-                "tags": get_tags(module, pure_1, name),
+                "tags": tags,
             }
         elif array_os == "Purity//FB":
+            tags, unkeyed = get_tags(module, pure_1, name)
+            unkeyed_tags += unkeyed
             names_info["FlashBlade"][name] = {
                 "os_version": getattr(appliances[appliance], "version", None),
                 "model": getattr(appliances[appliance], "model", None),
                 "fqdn": fqdn,
-                "tags": get_tags(module, pure_1, name),
+                "tags": tags,
             }
             value = get_latest_metric(module, pure_1, name, "array_read_bandwidth")
             if value is not None:
@@ -1366,6 +1438,8 @@ def generate_appliances_dict(module, pure_1):
                 )
         else:
             module.warn("Unknown operating system detected: {0}.".format(array_os))
+    warn_left_out(module, "Arrays without a name", "appliances", unnamed)
+    warn_left_out(module, "Tags without a key", "appliances", unkeyed_tags)
     return names_info
 
 
@@ -1437,14 +1511,14 @@ def main():
         )
     if "subscriptions" in subset or "all" in subset:
         info["subscriptions"] = collect_subset(
-            module, "subscriptions", generate_subscriptions_dict, pure_1
+            module, "subscriptions", generate_subscriptions_dict, pure_1, module
         )
         info["subscription_licenses"] = collect_subset(
-            module, "subscriptions", generate_subscription_licenses_dict, pure_1
+            module, "subscriptions", generate_subscription_licenses_dict, pure_1, module
         )
     if "contracts" in subset or "all" in subset:
         info["contracts"] = collect_subset(
-            module, "contracts", generate_contract_dict, pure_1
+            module, "contracts", generate_contract_dict, pure_1, module
         )
     if "environmental" in subset or "all" in subset:
         info["environmental"] = collect_subset(
