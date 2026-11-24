@@ -20,8 +20,9 @@ import importlib
 import pkgutil
 import re
 import sys
+import time
 import types
-from unittest.mock import NonCallableMock, create_autospec, patch
+from unittest.mock import create_autospec, patch
 
 import pytest
 
@@ -80,30 +81,6 @@ _SPEC_RULES = (
     "required_if",
     "required_by",
 )
-_REAL_MODULES = dict(sys.modules)
-
-
-def pytest_collectreport():
-    """Take back what a test file that is not converted yet put in sys.modules.
-
-    Such a file replaces ansible, pypureclient and the collection's
-    module_utils by mocks before it imports its module. This runs before a
-    file is imported and when it has been collected, so every file is
-    imported, and every test runs, on the real modules. A plugin module keeps
-    what it was first imported with: until its own test file is converted, no
-    converted file may import it. Delete both hooks with the last sys.modules
-    block in tests/unit.
-    """
-    for name, module in list(sys.modules.items()):
-        if isinstance(module, NonCallableMock):
-            if name in _REAL_MODULES:
-                sys.modules[name] = _REAL_MODULES[name]
-            else:
-                del sys.modules[name]
-
-
-# Given node ids, pytest imports the next file before it reports on this one
-pytest_collectstart = pytest_collectreport
 
 
 class _NoAnswer:
@@ -262,6 +239,14 @@ def sdk_model(class_name, **fields):
     return item
 
 
+def array_reference(name, **fields):
+    """Return a reference to an array, as the arrays of a pod or a volume hold.
+
+    The arrays of a Drive are of another class, DriveArrayStatus.
+    """
+    return sdk_model("FixedReferenceFqdn", name=name, **fields)
+
+
 def valid_response(items=(), total_item_count=None):
     """Return the SDK answer to a call that worked: status 200, one page of items."""
     items = list(items)
@@ -309,3 +294,19 @@ def pure1_client(client_factory):
 def no_sdk(monkeypatch):
     """Make 'import pypureclient' fail, as on a host without py-pure-client."""
     monkeypatch.setitem(sys.modules, "pypureclient", None)
+
+
+def _thirteen_hours_ahead(seconds=None):
+    if seconds is None:
+        seconds = time.time()
+    return time.gmtime(seconds + 13 * 3600)
+
+
+@pytest.fixture
+def localtime_ahead_of_utc(monkeypatch):
+    """Make time.localtime() run 13 hours ahead of UTC.
+
+    For a test of a time the code must give in UTC: on a host in UTC, as in
+    CI, local time is UTC and code that used localtime() would pass.
+    """
+    monkeypatch.setattr(time, "localtime", _thirteen_hours_ahead)

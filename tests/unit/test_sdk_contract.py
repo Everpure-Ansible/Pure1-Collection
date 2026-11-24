@@ -46,8 +46,7 @@ def newest_pure1_package(names):
 def find_sdk_client():
     """Return the path of the newest Pure1 client.py in py-pure-client, or None.
 
-    PathFinder looks at sys.path only, so the pypureclient stubs the other
-    test files put in sys.modules do not matter.
+    PathFinder looks at sys.path only: the SDK is found without importing it.
     """
     spec = importlib.machinery.PathFinder.find_spec("pypureclient")
     for location in getattr(spec, "submodule_search_locations", None) or []:

@@ -7,6 +7,8 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
+import calendar
+import time
 import types
 from unittest.mock import patch
 
@@ -113,6 +115,18 @@ class TestStandIns:
     def test_module_has_only_the_methods_of_ansible(self):
         with pytest.raises(AttributeError):
             ansible_module().warning("text")
+
+
+class TestFixtures:
+    """What a fixture of the harness changes for the test that asks for it."""
+
+    @pytest.mark.usefixtures("localtime_ahead_of_utc")
+    def test_localtime_runs_ahead_of_utc(self):
+        assert time.localtime(0)[:6] == (1970, 1, 1, 13, 0, 0)
+        assert time.gmtime(0)[:6] == (1970, 1, 1, 0, 0, 0)
+        # without an argument it is the time now, as for the real localtime
+        ahead = calendar.timegm(time.localtime()) - time.time()
+        assert 13 * 3600 - 2 < ahead < 13 * 3600 + 2
 
 
 class TestRunMain:

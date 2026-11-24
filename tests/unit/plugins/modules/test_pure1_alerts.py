@@ -9,8 +9,10 @@ __metaclass__ = type
 
 import time
 
+import pytest
+
 from plugins.modules import pure1_alerts
-from tests.unit.conftest import run_main, sdk_model, valid_response
+from tests.unit.conftest import error_response, run_main, sdk_model, valid_response
 
 
 def _make_alert(**overrides):
@@ -129,3 +131,19 @@ class TestPure1AlertsMain:
         module.fail_json.assert_called_once_with(
             msg="Failed to get any open alerts of severity critical for the fleet."
         )
+
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AttributeError,
+        reason="D011 pure1_alerts reads .items of an error answer, which has none",
+    )
+    def test_pure1_error_answer_fails_the_task(self, pure1_client):
+        pure1_client.get_alerts.return_value = error_response(403, "Access denied")
+
+        module = run_main(pure1_alerts, severity="critical")
+
+        module.exit_json.assert_not_called()
+        module.fail_json.assert_called_once()
+        message = module.fail_json.call_args[1]["msg"]
+        assert "403" in message
+        assert "Access denied" in message

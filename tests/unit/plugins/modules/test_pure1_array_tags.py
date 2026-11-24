@@ -7,60 +7,50 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
-import sys
-import types
+import inspect
 import pytest
-from unittest.mock import Mock, patch, MagicMock, call
+from unittest.mock import Mock, call, patch
 
-# Mock external dependencies before importing the module
-sys.modules["ansible"] = MagicMock()
-sys.modules["ansible.module_utils"] = MagicMock()
-sys.modules["ansible.module_utils.basic"] = MagicMock()
-sys.modules["pypureclient"] = MagicMock()
-sys.modules["pypureclient.pure1"] = MagicMock()
-sys.modules["ansible_collections"] = MagicMock()
-sys.modules["ansible_collections.everpure"] = MagicMock()
-sys.modules["ansible_collections.everpure.pure1"] = MagicMock()
-sys.modules["ansible_collections.everpure.pure1.plugins"] = MagicMock()
-sys.modules["ansible_collections.everpure.pure1.plugins.module_utils"] = MagicMock()
-sys.modules["ansible_collections.everpure.pure1.plugins.module_utils.pure1"] = (
-    MagicMock()
+from pypureclient import ApiError, ErrorResponse, ValidResponse
+
+from plugins.modules import pure1_array_tags
+from plugins.modules.pure1_array_tags import create_tag, delete_tag, update_tag
+from tests.unit.conftest import (
+    ansible_module,
+    error_response,
+    run_main,
+    sdk_model,
+    valid_response,
 )
 
-from plugins.modules.pure1_array_tags import create_tag, update_tag, delete_tag, main
+
+def _tag(key, value):
+    """A tag of the array foo, as get_arrays_tags lists it."""
+    return sdk_model(
+        "Tag",
+        key=key,
+        value=value,
+        resource=sdk_model("FixedReference", name="foo"),
+    )
 
 
 def _ok():
-    return Mock(status_code=200)
+    """The answer to a put that worked; the module reads only its status."""
+    return valid_response()
+
+
+def _deleted():
+    """The answer to a delete that worked: the SDK gives a status and no items."""
+    return ValidResponse(200, None, None, None, {})
 
 
 def _err(message="boom"):
-    return _err_answer([types.SimpleNamespace(message=message, context=None)])
+    return error_response(400, message)
 
 
 def _err_answer(errors):
-    # Like the SDK error answer: a status and an errors list, no items
-    return types.SimpleNamespace(status_code=400, errors=errors)
-
-
-def _sdk_put(recorder):
-    """put_arrays_tags with the py-pure-client 1.99.0 signature."""
-
-    def put_arrays_tags(
-        tag_put,
-        resources=None,
-        authorization=None,
-        x_request_id=None,
-        namespaces=None,
-        resource_ids=None,
-        resource_names=None,
-        _preload_content=True,
-        _return_http_data_only=None,
-        _request_timeout=None,
-    ):
-        return recorder(tag_put=tag_put, resource_names=resource_names)
-
-    return put_arrays_tags
+    # The SDK error answer: a status and an errors list, no items
+    return ErrorResponse(400, errors, {})
 
 
 def _old_sdk_put(recorder):
@@ -87,14 +77,10 @@ def _old_sdk_put(recorder):
 # Error lists an error answer can carry, and the text the module reports
 ERROR_ANSWERS = [
     ([], "HTTP status 400"),
-    ([types.SimpleNamespace(message=None, context=None)], "HTTP status 400"),
-    ([types.SimpleNamespace(message="Invalid value", context=None)], "Invalid value"),
+    ([ApiError(context=None, message=None)], "HTTP status 400"),
+    ([ApiError(context=None, message="Invalid value")], "Invalid value"),
     (
-        [
-            types.SimpleNamespace(
-                message="Invalid value", context="No arrays with name: foo"
-            )
-        ],
+        [ApiError(context="No arrays with name: foo", message="Invalid value")],
         "Invalid value: No arrays with name: foo",
     ),
 ]
@@ -103,41 +89,35 @@ ERROR_ANSWERS = [
 class TestCreateTag:
     """Tests for create_tag."""
 
-    def test_check_mode_makes_no_api_call(self):
-        module = Mock()
-        module.check_mode = True
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
-        client = Mock()
+    def test_check_mode_makes_no_api_call(self, pure1_client):
+        module = ansible_module(check_mode=True, name="foo", tag=["key1:value1"])
 
-        create_tag(module, client)
+        with pytest.raises(SystemExit):
+            create_tag(module, pure1_client)
 
-        client.put_arrays_tags.assert_not_called()
+        pure1_client.put_arrays_tags.assert_not_called()
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_creates_tag_with_parsed_key_value(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
-        client = Mock()
-        client.put_arrays_tags.return_value = _ok()
+    def test_creates_tag_with_parsed_key_value(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1"])
+        pure1_client.put_arrays_tags.return_value = _ok()
 
-        create_tag(module, client)
+        with pytest.raises(SystemExit):
+            create_tag(module, pure1_client)
 
-        client.put_arrays_tags.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             resource_names=["foo"], tag_put=[{"key": "key1", "value": "value1"}]
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_all_tags_are_sent_in_one_call(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1", "key2:value2"]}
-        client = Mock()
-        client.put_arrays_tags.return_value = _ok()
+    def test_all_tags_are_sent_in_one_call(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1", "key2:value2"])
+        pure1_client.put_arrays_tags.return_value = _ok()
 
-        create_tag(module, client)
+        with pytest.raises(SystemExit):
+            create_tag(module, pure1_client)
 
-        client.put_arrays_tags.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             resource_names=["foo"],
             tag_put=[
                 {"key": "key1", "value": "value1"},
@@ -146,19 +126,16 @@ class TestCreateTag:
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_repeated_key_is_sent_once_with_the_last_value(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {
-            "name": "foo",
-            "tag": ["key1:value1", "key2:value2", "key1:value3"],
-        }
-        client = Mock()
-        client.put_arrays_tags.return_value = _ok()
+    def test_repeated_key_is_sent_once_with_the_last_value(self, pure1_client):
+        module = ansible_module(
+            name="foo", tag=["key1:value1", "key2:value2", "key1:value3"]
+        )
+        pure1_client.put_arrays_tags.return_value = _ok()
 
-        create_tag(module, client)
+        with pytest.raises(SystemExit):
+            create_tag(module, pure1_client)
 
-        client.put_arrays_tags.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             resource_names=["foo"],
             tag_put=[
                 {"key": "key1", "value": "value3"},
@@ -167,105 +144,89 @@ class TestCreateTag:
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_empty_tag_list_makes_no_api_call(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": []}
-        client = Mock()
-
-        create_tag(module, client)
-
-        client.put_arrays_tags.assert_not_called()
-        module.exit_json.assert_called_once_with(changed=True)
-
-    def test_api_failure_calls_fail_json(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
-        module.fail_json.side_effect = SystemExit("fail_json called")
-        client = Mock()
-        client.put_arrays_tags.return_value = _err()
+    def test_empty_tag_list_makes_no_api_call(self, pure1_client):
+        module = ansible_module(name="foo", tag=[])
 
         with pytest.raises(SystemExit):
-            create_tag(module, client)
+            create_tag(module, pure1_client)
+
+        pure1_client.put_arrays_tags.assert_not_called()
+        module.exit_json.assert_called_once_with(changed=True)
+
+    def test_api_failure_calls_fail_json(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1"])
+        pure1_client.put_arrays_tags.return_value = _err()
+
+        with pytest.raises(SystemExit):
+            create_tag(module, pure1_client)
 
         module.fail_json.assert_called_once()
+        assert module.fail_json.call_args[1]["msg"] == (
+            "Failed to add tag KVP key1:value1 to array foo. Error: boom"
+        )
+        module.exit_json.assert_not_called()
 
 
 class TestUpdateTag:
     """Tests for update_tag."""
 
-    def test_check_mode_makes_no_api_call(self):
-        module = Mock()
-        module.check_mode = True
-        module.params = {"name": "foo", "tag": ["key1:value2"]}
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        client = Mock()
+    def test_check_mode_makes_no_api_call(self, pure1_client):
+        module = ansible_module(check_mode=True, name="foo", tag=["key1:value2"])
+        current = [_tag("key1", "value1")]
 
-        update_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            update_tag(module, pure1_client, current)
 
-        client.put_arrays_tags.assert_not_called()
+        pure1_client.put_arrays_tags.assert_not_called()
         module.exit_json.assert_called_once_with(changed=False)
 
-    def test_existing_tag_same_value_no_change(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        client = Mock()
+    def test_existing_tag_same_value_no_change(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1"])
+        current = [_tag("key1", "value1")]
 
-        update_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            update_tag(module, pure1_client, current)
 
-        client.put_arrays_tags.assert_not_called()
+        pure1_client.put_arrays_tags.assert_not_called()
         module.exit_json.assert_called_once_with(changed=False)
 
-    def test_existing_tag_changed_value_updates(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value2"]}
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        client = Mock()
-        client.put_arrays_tags.return_value = _ok()
+    def test_existing_tag_changed_value_updates(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value2"])
+        current = [_tag("key1", "value1")]
+        pure1_client.put_arrays_tags.return_value = _ok()
 
-        update_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            update_tag(module, pure1_client, current)
 
-        client.put_arrays_tags.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             resource_names=["foo"], tag_put=[{"key": "key1", "value": "value2"}]
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_new_tag_is_added(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key2:value2"]}
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        client = Mock()
-        client.put_arrays_tags.return_value = _ok()
+    def test_new_tag_is_added(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key2:value2"])
+        current = [_tag("key1", "value1")]
+        pure1_client.put_arrays_tags.return_value = _ok()
 
-        update_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            update_tag(module, pure1_client, current)
 
-        client.put_arrays_tags.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             resource_names=["foo"], tag_put=[{"key": "key2", "value": "value2"}]
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_only_changed_and_new_tags_are_sent_in_one_call(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {
-            "name": "foo",
-            "tag": ["key1:value1", "key2:new", "key3:value3"],
-        }
-        current = [
-            types.SimpleNamespace(key="key1", value="value1"),
-            types.SimpleNamespace(key="key2", value="old"),
-        ]
-        client = Mock()
-        client.put_arrays_tags.return_value = _ok()
+    def test_only_changed_and_new_tags_are_sent_in_one_call(self, pure1_client):
+        module = ansible_module(
+            name="foo", tag=["key1:value1", "key2:new", "key3:value3"]
+        )
+        current = [_tag("key1", "value1"), _tag("key2", "old")]
+        pure1_client.put_arrays_tags.return_value = _ok()
 
-        update_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            update_tag(module, pure1_client, current)
 
-        client.put_arrays_tags.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             resource_names=["foo"],
             tag_put=[
                 {"key": "key2", "value": "new"},
@@ -274,20 +235,18 @@ class TestUpdateTag:
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_repeated_key_is_sent_once_with_the_last_value(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {
-            "name": "foo",
-            "tag": ["key1:value2", "key2:value2", "key1:value3", "key2:value3"],
-        }
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        client = Mock()
-        client.put_arrays_tags.return_value = _ok()
+    def test_repeated_key_is_sent_once_with_the_last_value(self, pure1_client):
+        module = ansible_module(
+            name="foo",
+            tag=["key1:value2", "key2:value2", "key1:value3", "key2:value3"],
+        )
+        current = [_tag("key1", "value1")]
+        pure1_client.put_arrays_tags.return_value = _ok()
 
-        update_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            update_tag(module, pure1_client, current)
 
-        client.put_arrays_tags.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             resource_names=["foo"],
             tag_put=[
                 {"key": "key1", "value": "value3"},
@@ -296,20 +255,15 @@ class TestUpdateTag:
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_key_read_twice_is_sent_once(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:new"]}
-        current = [
-            types.SimpleNamespace(key="key1", value="old"),
-            types.SimpleNamespace(key="key1", value="older"),
-        ]
-        client = Mock()
-        client.put_arrays_tags.return_value = _ok()
+    def test_key_read_twice_is_sent_once(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:new"])
+        current = [_tag("key1", "old"), _tag("key1", "older")]
+        pure1_client.put_arrays_tags.return_value = _ok()
 
-        update_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            update_tag(module, pure1_client, current)
 
-        client.put_arrays_tags.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             resource_names=["foo"], tag_put=[{"key": "key1", "value": "new"}]
         )
         module.exit_json.assert_called_once_with(changed=True)
@@ -318,127 +272,111 @@ class TestUpdateTag:
 class TestDeleteTag:
     """Tests for delete_tag."""
 
-    def test_matching_tag_is_deleted(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        client = Mock()
-        client.delete_arrays_tags.return_value = _ok()
+    def test_matching_tag_is_deleted(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1"])
+        current = [_tag("key1", "value1")]
+        pure1_client.delete_arrays_tags.return_value = _deleted()
 
-        delete_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            delete_tag(module, pure1_client, current)
 
-        client.delete_arrays_tags.assert_called_once_with(
+        pure1_client.delete_arrays_tags.assert_called_once_with(
             resource_names=["foo"], keys=["key1"]
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_each_matching_key_is_deleted_in_its_own_call(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1", "key2:value2"]}
-        current = [
-            types.SimpleNamespace(key="key1", value="value1"),
-            types.SimpleNamespace(key="key2", value="value2"),
-        ]
-        client = Mock()
-        client.delete_arrays_tags.return_value = _ok()
+    def test_each_matching_key_is_deleted_in_its_own_call(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1", "key2:value2"])
+        current = [_tag("key1", "value1"), _tag("key2", "value2")]
+        pure1_client.delete_arrays_tags.side_effect = [_deleted(), _deleted()]
 
-        delete_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            delete_tag(module, pure1_client, current)
 
-        assert client.delete_arrays_tags.call_args_list == [
+        assert pure1_client.delete_arrays_tags.call_args_list == [
             call(resource_names=["foo"], keys=["key1"]),
             call(resource_names=["foo"], keys=["key2"]),
         ]
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_non_matching_tag_is_not_deleted(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key2:value2"]}
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        client = Mock()
+    def test_non_matching_tag_is_not_deleted(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key2:value2"])
+        current = [_tag("key1", "value1")]
 
-        delete_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            delete_tag(module, pure1_client, current)
 
-        client.delete_arrays_tags.assert_not_called()
+        pure1_client.delete_arrays_tags.assert_not_called()
         module.exit_json.assert_called_once_with(changed=False)
 
-    def test_check_mode_makes_no_api_call(self):
-        module = Mock()
-        module.check_mode = True
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        client = Mock()
+    def test_check_mode_makes_no_api_call(self, pure1_client):
+        module = ansible_module(check_mode=True, name="foo", tag=["key1:value1"])
+        current = [_tag("key1", "value1")]
 
-        delete_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            delete_tag(module, pure1_client, current)
 
-        client.delete_arrays_tags.assert_not_called()
+        pure1_client.delete_arrays_tags.assert_not_called()
         module.exit_json.assert_called_once_with(changed=False)
 
 
 class TestTagKeyword:
     """The tags go under the keyword the SDK's put_arrays_tags takes."""
 
-    def test_create_is_accepted_by_the_sdk_signature(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
-        recorder = Mock(return_value=_ok())
-        client = Mock()
-        client.put_arrays_tags = _sdk_put(recorder)
+    def test_create_is_accepted_by_the_sdk_signature(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1"])
+        pure1_client.put_arrays_tags.return_value = _ok()
+        # The stand-in checks each call against the signature of the SDK
+        keywords = inspect.signature(pure1_client.put_arrays_tags).parameters
+        assert "tag_put" in keywords and "tag" not in keywords
 
-        create_tag(module, client)
+        with pytest.raises(SystemExit):
+            create_tag(module, pure1_client)
 
-        recorder.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             tag_put=[{"key": "key1", "value": "value1"}], resource_names=["foo"]
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_update_is_accepted_by_the_sdk_signature(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value2"]}
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        recorder = Mock(return_value=_ok())
-        client = Mock()
-        client.put_arrays_tags = _sdk_put(recorder)
+    def test_update_is_accepted_by_the_sdk_signature(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value2"])
+        current = [_tag("key1", "value1")]
+        pure1_client.put_arrays_tags.return_value = _ok()
+        keywords = inspect.signature(pure1_client.put_arrays_tags).parameters
+        assert "tag_put" in keywords and "tag" not in keywords
 
-        update_tag(module, client, current)
+        with pytest.raises(SystemExit):
+            update_tag(module, pure1_client, current)
 
-        recorder.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             tag_put=[{"key": "key1", "value": "value2"}], resource_names=["foo"]
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_old_sdk_signature_gets_the_tag_keyword(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
+    def test_old_sdk_signature_gets_the_tag_keyword(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1"])
         recorder = Mock(return_value=_ok())
-        client = Mock()
-        client.put_arrays_tags = _old_sdk_put(recorder)
+        pure1_client.put_arrays_tags = _old_sdk_put(recorder)
 
-        create_tag(module, client)
+        with pytest.raises(SystemExit):
+            create_tag(module, pure1_client)
 
         recorder.assert_called_once_with(
             tag=[{"key": "key1", "value": "value1"}], resource_names=["foo"]
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    def test_signature_with_both_keywords_gets_tag_put(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
+    def test_signature_with_both_keywords_gets_tag_put(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1"])
         recorder = Mock(return_value=_ok())
 
         def put_arrays_tags(tag_put=None, tag=None, resource_names=None):
             return recorder(tag_put=tag_put, tag=tag, resource_names=resource_names)
 
-        client = Mock()
-        client.put_arrays_tags = put_arrays_tags
+        pure1_client.put_arrays_tags = put_arrays_tags
 
-        create_tag(module, client)
+        with pytest.raises(SystemExit):
+            create_tag(module, pure1_client)
 
         recorder.assert_called_once_with(
             tag_put=[{"key": "key1", "value": "value1"}],
@@ -446,104 +384,79 @@ class TestTagKeyword:
             resource_names=["foo"],
         )
 
-    def test_uninspectable_method_gets_tag_put(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
-        client = Mock()
-        client.put_arrays_tags.return_value = _ok()
+    def test_uninspectable_method_gets_tag_put(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1"])
+        # Before the patch: a stand-in method first used under it checks nothing
+        pure1_client.put_arrays_tags.return_value = _ok()
 
         with patch("inspect.signature", side_effect=ValueError("no signature")):
-            create_tag(module, client)
+            with pytest.raises(SystemExit):
+                create_tag(module, pure1_client)
 
-        client.put_arrays_tags.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             resource_names=["foo"], tag_put=[{"key": "key1", "value": "value1"}]
         )
 
-    def test_type_error_inside_the_sdk_call_is_not_retried(self):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
-        recorder = Mock(side_effect=TypeError("raised inside the SDK"))
-        client = Mock()
-        client.put_arrays_tags = _sdk_put(recorder)
+    def test_type_error_inside_the_sdk_call_is_not_retried(self, pure1_client):
+        module = ansible_module(name="foo", tag=["key1:value1"])
+        pure1_client.put_arrays_tags.side_effect = TypeError("raised inside the SDK")
 
         with pytest.raises(TypeError, match="raised inside the SDK"):
-            create_tag(module, client)
+            create_tag(module, pure1_client)
 
-        recorder.assert_called_once()
+        pure1_client.put_arrays_tags.assert_called_once()
 
 
 @pytest.mark.parametrize("errors, text", ERROR_ANSWERS)
 class TestErrorAnswers:
     """An error answer becomes a failure message, whatever its errors list holds."""
 
-    def test_create(self, errors, text):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1", "key2:value2"]}
-        module.fail_json.side_effect = SystemExit("fail_json called")
-        client = Mock()
-        client.put_arrays_tags.return_value = _err_answer(errors)
+    def test_create(self, pure1_client, errors, text):
+        module = ansible_module(name="foo", tag=["key1:value1", "key2:value2"])
+        pure1_client.put_arrays_tags.return_value = _err_answer(errors)
 
         with pytest.raises(SystemExit):
-            create_tag(module, client)
+            create_tag(module, pure1_client)
 
         module.fail_json.assert_called_once_with(
             msg="Failed to add tag KVP key1:value1, key2:value2 to array foo. "
             "Error: " + text
         )
 
-    def test_update(self, errors, text):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value2", "key2:value2"]}
-        module.fail_json.side_effect = SystemExit("fail_json called")
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        client = Mock()
-        client.put_arrays_tags.return_value = _err_answer(errors)
+    def test_update(self, pure1_client, errors, text):
+        module = ansible_module(name="foo", tag=["key1:value2", "key2:value2"])
+        current = [_tag("key1", "value1")]
+        pure1_client.put_arrays_tags.return_value = _err_answer(errors)
 
         with pytest.raises(SystemExit):
-            update_tag(module, client, current)
+            update_tag(module, pure1_client, current)
 
         module.fail_json.assert_called_once_with(
             msg="Failed to update tags 'key1, key2' on array foo. Error: " + text
         )
 
-    def test_delete(self, errors, text):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"]}
-        module.fail_json.side_effect = SystemExit("fail_json called")
-        current = [types.SimpleNamespace(key="key1", value="value1")]
-        client = Mock()
-        client.delete_arrays_tags.return_value = _err_answer(errors)
+    def test_delete(self, pure1_client, errors, text):
+        module = ansible_module(name="foo", tag=["key1:value1"])
+        current = [_tag("key1", "value1")]
+        pure1_client.delete_arrays_tags.return_value = _err_answer(errors)
 
         with pytest.raises(SystemExit):
-            delete_tag(module, client, current)
+            delete_tag(module, pure1_client, current)
 
         module.fail_json.assert_called_once_with(
             msg="Failed to remove tag KVP 'key1:value1' from volume foo. "
             "Error: " + text
         )
 
-    @patch("plugins.modules.pure1_array_tags.get_pure1")
-    @patch("plugins.modules.pure1_array_tags.AnsibleModule")
-    def test_tag_read(self, mock_am, mock_get_pure1, errors, text):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"], "state": "present"}
-        module.fail_json.side_effect = SystemExit("fail_json called")
-        mock_am.return_value = module
-        client = Mock()
-        client.get_arrays_tags.return_value = _err_answer(errors)
-        mock_get_pure1.return_value = client
+    def test_tag_read(self, pure1_client, errors, text):
+        pure1_client.get_arrays_tags.return_value = _err_answer(errors)
 
-        with pytest.raises(SystemExit):
-            main()
+        module = run_main(
+            pure1_array_tags, name="foo", tag=["key1:value1"], state="present"
+        )
 
-        client.get_arrays_tags.assert_called_once_with(resource_names=["foo"])
-        client.put_arrays_tags.assert_not_called()
+        pure1_client.get_arrays_tags.assert_called_once_with(resource_names=["foo"])
+        pure1_client.put_arrays_tags.assert_not_called()
         module.fail_json.assert_called_once_with(
             msg="Failed to get tags of array foo. Error: " + text
         )
@@ -552,47 +465,95 @@ class TestErrorAnswers:
 class TestMain:
     """Tests for the pure1_array_tags main() flow."""
 
-    @patch("plugins.modules.pure1_array_tags.get_pure1")
-    @patch("plugins.modules.pure1_array_tags.AnsibleModule")
-    def test_present_without_tags_creates(self, mock_am, mock_get_pure1):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"], "state": "present"}
-        module.exit_json.side_effect = SystemExit("exit_json called")
-        mock_am.return_value = module
-        client = Mock()
-        client.get_arrays_tags.return_value = Mock(status_code=200, items=[])
-        client.put_arrays_tags.return_value = _ok()
-        mock_get_pure1.return_value = client
+    def test_present_without_tags_creates(self, pure1_client):
+        pure1_client.get_arrays_tags.return_value = valid_response([])
+        pure1_client.put_arrays_tags.return_value = _ok()
 
-        with pytest.raises(SystemExit):
-            main()
+        module = run_main(
+            pure1_array_tags, name="foo", tag=["key1:value1"], state="present"
+        )
 
-        client.put_arrays_tags.assert_called_once_with(
+        pure1_client.put_arrays_tags.assert_called_once_with(
             resource_names=["foo"], tag_put=[{"key": "key1", "value": "value1"}]
         )
         module.exit_json.assert_called_once_with(changed=True)
 
-    @patch("plugins.modules.pure1_array_tags.get_pure1")
-    @patch("plugins.modules.pure1_array_tags.AnsibleModule")
-    def test_absent_with_matching_tag_deletes(self, mock_am, mock_get_pure1):
-        module = Mock()
-        module.check_mode = False
-        module.params = {"name": "foo", "tag": ["key1:value1"], "state": "absent"}
-        module.exit_json.side_effect = SystemExit("exit_json called")
-        mock_am.return_value = module
-        client = Mock()
-        client.get_arrays_tags.return_value = Mock(
-            status_code=200,
-            items=[types.SimpleNamespace(key="key1", value="value1")],
+    def test_absent_with_matching_tag_deletes(self, pure1_client):
+        pure1_client.get_arrays_tags.return_value = valid_response(
+            [_tag("key1", "value1")]
         )
-        client.delete_arrays_tags.return_value = _ok()
-        mock_get_pure1.return_value = client
+        pure1_client.delete_arrays_tags.return_value = _deleted()
 
-        with pytest.raises(SystemExit):
-            main()
+        module = run_main(
+            pure1_array_tags, name="foo", tag=["key1:value1"], state="absent"
+        )
 
-        client.delete_arrays_tags.assert_called_once_with(
+        pure1_client.delete_arrays_tags.assert_called_once_with(
             resource_names=["foo"], keys=["key1"]
         )
         module.exit_json.assert_called_once_with(changed=True)
+
+    def test_present_with_tags_updates(self, pure1_client):
+        pure1_client.get_arrays_tags.return_value = valid_response(
+            [_tag("key1", "value1"), _tag("key2", "old")]
+        )
+        pure1_client.put_arrays_tags.return_value = _ok()
+
+        # state is left to the argument spec
+        module = run_main(pure1_array_tags, name="foo", tag=["key1:value1", "key2:new"])
+
+        pure1_client.get_arrays_tags.assert_called_once_with(resource_names=["foo"])
+        pure1_client.put_arrays_tags.assert_called_once_with(
+            resource_names=["foo"], tag_put=[{"key": "key2", "value": "new"}]
+        )
+        module.exit_json.assert_called_once_with(changed=True)
+
+    def test_present_with_the_same_tags_changes_nothing(self, pure1_client):
+        pure1_client.get_arrays_tags.return_value = valid_response(
+            [_tag("key1", "value1")]
+        )
+
+        module = run_main(pure1_array_tags, name="foo", tag=["key1:value1"])
+
+        # the one call that lists arrays is the check of get_pure1
+        pure1_client.get_arrays.assert_called_once_with()
+        pure1_client.put_arrays_tags.assert_not_called()
+        module.exit_json.assert_called_once_with(changed=False)
+
+    def test_absent_without_tags_changes_nothing(self, pure1_client):
+        pure1_client.get_arrays_tags.return_value = valid_response([])
+
+        module = run_main(
+            pure1_array_tags, name="foo", tag=["key1:value1"], state="absent"
+        )
+
+        pure1_client.delete_arrays_tags.assert_not_called()
+        pure1_client.put_arrays_tags.assert_not_called()
+        module.exit_json.assert_called_once_with(changed=False)
+
+    def test_check_mode_reads_the_tags_and_writes_nothing(self, pure1_client):
+        pure1_client.get_arrays_tags.return_value = valid_response([])
+
+        module = run_main(
+            pure1_array_tags, check_mode=True, name="foo", tag=["key1:value1"]
+        )
+
+        pure1_client.get_arrays_tags.assert_called_once_with(resource_names=["foo"])
+        pure1_client.put_arrays_tags.assert_not_called()
+        module.exit_json.assert_called_once_with(changed=True)
+
+    def test_name_and_tag_are_required(self):
+        module = run_main(pure1_array_tags)
+
+        module.fail_json.assert_called_once_with(
+            msg="missing required arguments: name, tag"
+        )
+
+    def test_state_is_absent_or_present(self):
+        module = run_main(
+            pure1_array_tags, name="foo", tag=["key1:value1"], state="gone"
+        )
+
+        module.fail_json.assert_called_once_with(
+            msg="value of state must be one of: absent, present, got: gone"
+        )
