@@ -8,23 +8,18 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
-ANSIBLE_METADATA = {
-    "metadata_version": "1.1",
-    "status": ["preview"],
-    "supported_by": "community",
-}
-
 DOCUMENTATION = r"""
 ---
 module: pure1_info
 version_added: '1.0.0'
 short_description: Collect information from Pure1
 description:
-  - Collect information from a Pure1.
-  - By default, the module will collect basic
-    information including counts for appliances, volumes, filesystems, snapshots
-    and buckets. Fileset capacity and data reduction rates are also provided.
-  - Additional information can be collected based on the configured set of arguements.
+  - Collect information from Pure1.
+  - By default, the module collects the C(minimum) subset, which is the number
+    of appliances of each type and the number of volumes, volume snapshots,
+    filesystems, filesystem snapshots, buckets, directories, pods and object
+    store accounts. It is returned under the key C(default).
+  - Additional information can be collected based on the configured set of arguments.
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 options:
@@ -33,6 +28,9 @@ options:
       - When supplied, this argument will define the information to be collected.
         Possible values for this include all, minimum, appliances, subscriptions,
         contracts, environmental and invoices.
+      - The C(minimum) subset is returned under the key C(default) and the
+        C(subscriptions) subset under the keys C(subscriptions) and
+        C(subscription_licenses). Every other subset is returned under its own name.
     type: list
     elements: str
     required: false
@@ -42,37 +40,811 @@ extends_documentation_fragment:
 """
 
 EXAMPLES = r"""
-- name: collect default set of information
+- name: Collect default set of information
   everpure.pure1.pure1_info:
-    register: pure1_info
+    app_id: pure1:apikey:dssf2331sd
+    key_file: /home/user/private.pem
+  register: pure1_info
 
-- name: show default information
-  debug:
+- name: Show default information
+  ansible.builtin.debug:
     msg: "{{ pure1_info['pure1_info']['default'] }}"
 
-- name: collect all information
+- name: Collect all information
   everpure.pure1.pure1_info:
     gather_subset:
       - all
-- name: show all information
-  debug:
+  register: pure1_info
+
+- name: Show all information
+  ansible.builtin.debug:
     msg: "{{ pure1_info['pure1_info'] }}"
 """
 
 RETURN = r"""
 pure1_info:
-  description: Returns the information collected from Pure1
+  description:
+    - The information collected from Pure1, with one key for each section that the
+      requested subsets fill.
+    - A section that the API key is not permitted to read (status code 403) is returned
+      empty with a warning. The C(invoices) section is returned empty with a warning
+      for any error answer.
   returned: always
   type: dict
+  contains:
+    default:
+      description:
+        - The C(minimum) subset, the number of appliances of each type and of the
+          objects on them.
+      returned: when I(gather_subset) includes C(minimum) or C(all)
+      type: dict
+      contains:
+        FlashArrays:
+          description: Number of appliances that run Purity//FA.
+          type: int
+        FlashBlades:
+          description: Number of appliances that run Purity//FB.
+          type: int
+        ObjectEngines:
+          description: Number of appliances that run Elasticity.
+          type: int
+        volumes:
+          description: Number of volumes.
+          type: int
+        volume_snapshots:
+          description: Number of volume snapshots.
+          type: int
+        filesystems:
+          description: Number of filesystems.
+          type: int
+        filesystem_snapshots:
+          description: Number of filesystem snapshots.
+          type: int
+        buckets:
+          description: Number of buckets.
+          type: int
+        directories:
+          description: Number of directories.
+          type: int
+        pods:
+          description: Number of pods.
+          type: int
+        object_store_accounts:
+          description: Number of object store accounts.
+          type: int
+      sample:
+        FlashArrays: 2
+        FlashBlades: 1
+        ObjectEngines: 0
+        volumes: 120
+        volume_snapshots: 340
+        filesystems: 12
+        filesystem_snapshots: 48
+        buckets: 6
+        directories: 20
+        pods: 4
+        object_store_accounts: 3
+    appliances:
+      description:
+        - The C(appliances) subset, the appliances of each type with their tags and
+          their latest performance figures.
+        - A performance figure is the latest value of the last five hours, where each
+          value is the maximum of three minutes. Its key is left out when Pure1 has no
+          value for the appliance, and with a warning when Pure1 refuses the request.
+      returned: when I(gather_subset) includes C(appliances) or C(all)
+      type: dict
+      contains:
+        FlashArray:
+          description: The appliances that run Purity//FA, keyed by array name.
+          type: dict
+          contains:
+            os_version:
+              description: Purity version of the array.
+              type: str
+            model:
+              description: Model of the array.
+              type: str
+            fqdn:
+              description:
+                - Fully qualified domain name of the array, an empty string when
+                  Pure1 has none.
+              type: str
+            tags:
+              description:
+                - Tags of the array. Empty when the array has none, and with a
+                  warning when Pure1 refuses to list them.
+              type: list
+              elements: dict
+              contains:
+                key:
+                  description: Key of the tag.
+                  type: str
+                value:
+                  description: Value of the tag.
+                  type: str
+                org_id:
+                  description: ID of the organization of the tag, null when Pure1 has none.
+                  type: int
+                namespace:
+                  description: Namespace of the tag.
+                  type: str
+            "bandwidth (read) [MB/s]":
+              description:
+                - Read bandwidth in bytes per second divided by 1048576 (MiB/s),
+                  rounded to three decimals.
+              type: float
+            "bandwidth (write) [MB/s]":
+              description:
+                - Write bandwidth in bytes per second divided by 1048576 (MiB/s),
+                  rounded to three decimals.
+              type: float
+            "latency (read) [ms]":
+              description: Read latency in milliseconds, rounded to two decimals.
+              type: float
+            "latency (write) [ms]":
+              description: Write latency in milliseconds, rounded to two decimals.
+              type: float
+            "iops (read)":
+              description: Read operations per second, rounded to a whole number.
+              type: int
+            "iops (write)":
+              description: Write operations per second, rounded to a whole number.
+              type: int
+            "load [%]":
+              description: Load of the array in percent, rounded to three decimals.
+              type: float
+        FlashBlade:
+          description: The appliances that run Purity//FB, keyed by array name.
+          type: dict
+          contains:
+            os_version:
+              description: Purity version of the array.
+              type: str
+            model:
+              description: Model of the array.
+              type: str
+            fqdn:
+              description:
+                - Fully qualified domain name of the array, an empty string when
+                  Pure1 has none.
+              type: str
+            tags:
+              description:
+                - Tags of the array. Empty when the array has none, and with a
+                  warning when Pure1 refuses to list them.
+              type: list
+              elements: dict
+              contains:
+                key:
+                  description: Key of the tag.
+                  type: str
+                value:
+                  description: Value of the tag.
+                  type: str
+                org_id:
+                  description: ID of the organization of the tag, null when Pure1 has none.
+                  type: int
+                namespace:
+                  description: Namespace of the tag.
+                  type: str
+            "bandwidth (read) [MB/s]":
+              description:
+                - Read bandwidth in bytes per second divided by 1048576 (MiB/s),
+                  rounded to three decimals.
+              type: float
+            "bandwidth (write) [MB/s]":
+              description:
+                - Write bandwidth in bytes per second divided by 1048576 (MiB/s),
+                  rounded to three decimals.
+              type: float
+            "latency (read) [ms]":
+              description: Read latency in milliseconds, rounded to two decimals.
+              type: float
+            "latency (write) [ms]":
+              description: Write latency in milliseconds, rounded to two decimals.
+              type: float
+            "iops (read)":
+              description: Read operations per second, rounded to a whole number.
+              type: int
+            "iops (write)":
+              description: Write operations per second, rounded to a whole number.
+              type: int
+        ObjectEngine:
+          description:
+            - The appliances that run Elasticity, keyed by appliance name. No
+              performance figures are collected for them.
+          type: dict
+          contains:
+            os_version:
+              description: Version of the operating system of the appliance.
+              type: str
+            model:
+              description: Model of the appliance.
+              type: str
+            fqdn:
+              description:
+                - Fully qualified domain name of the appliance, an empty string when
+                  Pure1 has none.
+              type: str
+            tags:
+              description:
+                - Tags of the appliance. Empty when the appliance has none, and with
+                  a warning when Pure1 refuses to list them.
+              type: list
+              elements: dict
+              contains:
+                key:
+                  description: Key of the tag.
+                  type: str
+                value:
+                  description: Value of the tag.
+                  type: str
+                org_id:
+                  description: ID of the organization of the tag, null when Pure1 has none.
+                  type: int
+                namespace:
+                  description: Namespace of the tag.
+                  type: str
+      sample:
+        FlashArray:
+          array1:
+            os_version: "6.5.0"
+            model: FA-X70R4
+            fqdn: array1.example.com
+            tags:
+              - key: site
+                value: lab
+                org_id: null
+                namespace: pure1
+            "bandwidth (read) [MB/s]": 10.575
+            "bandwidth (write) [MB/s]": 1.0
+            "latency (read) [ms]": 1.23
+            "latency (write) [ms]": 0.25
+            "iops (read)": 1000
+            "iops (write)": 2000
+            "load [%]": 45.679
+        FlashBlade:
+          array2:
+            os_version: "4.5.2"
+            model: FlashBlade
+            fqdn: array2.example.com
+            tags: []
+            "bandwidth (read) [MB/s]": 2.047
+            "bandwidth (write) [MB/s]": 20.473
+            "latency (read) [ms]": 0.66
+            "latency (write) [ms]": 0.92
+            "iops (read)": 61
+            "iops (write)": 2432
+        ObjectEngine: {}
+    subscriptions:
+      description:
+        - The subscriptions of the organization, keyed by subscription name. It is
+          the first of the two sections of the C(subscriptions) subset.
+      returned: when I(gather_subset) includes C(subscriptions) or C(all)
+      type: dict
+      contains:
+        start_date:
+          description: Start of the subscription, as C(YYYY-MM-DD HH:MM:SS UTC).
+          type: str
+        expiration_date:
+          description: End of the subscription, as C(YYYY-MM-DD HH:MM:SS UTC).
+          type: str
+        service:
+          description: Service type of the subscription.
+          type: str
+        status:
+          description: Status of the subscription.
+          type: str
+        org_name:
+          description: Name of the Pure1 organization of the subscription.
+          type: str
+        partner_name:
+          description:
+            - Name of the partner who invoices for the subscription, null when Pure1
+              has none.
+          type: str
+        subscription_term:
+          description: Length of the subscription in months.
+          type: int
+      sample:
+        subscription1:
+          start_date: "2021-01-01 00:00:00 UTC"
+          expiration_date: "2024-01-01 00:00:00 UTC"
+          service: Evergreen//One
+          status: active
+          org_name: Example Org
+          partner_name: null
+          subscription_term: 36
+    subscription_licenses:
+      description:
+        - The licenses of the subscriptions, keyed by license name. It is the second
+          of the two sections of the C(subscriptions) subset.
+      returned: when I(gather_subset) includes C(subscriptions) or C(all)
+      type: dict
+      contains:
+        start_date:
+          description: Start of the license, as C(YYYY-MM-DD HH:MM:SS UTC).
+          type: str
+        expiration_date:
+          description: End of the license, as C(YYYY-MM-DD HH:MM:SS UTC).
+          type: str
+        last_updated:
+          description: Date of the last amendment of the license, as C(YYYY-MM-DD HH:MM:SS UTC).
+          type: str
+        marketplace_partner:
+          description: Name of the marketplace partner of the license, null when Pure1 has none.
+          type: str
+        service_tier:
+          description: Tier of the service of the license.
+          type: str
+        location:
+          description: Site address of the license, null when Pure1 has none.
+          type: dict
+          contains:
+            city:
+              description: City of the site.
+              type: str
+            state:
+              description: State or province of the site.
+              type: str
+            country:
+              description: Country of the site.
+              type: str
+        pre_ratio:
+          description: Pre-ratio of the license, null when Pure1 has none.
+          type: dict
+          contains:
+            data:
+              description: The value.
+              type: float
+            unit:
+              description: Unit of the value.
+              type: str
+        energy_usage:
+          description: Always null, Pure1 reports no energy usage for a license.
+          type: raw
+        subscription:
+          description: Name of the subscription of the license.
+          type: str
+        average_on_demand:
+          description:
+            - Estimated daily on-demand usage of the license in the current calendar
+              quarter to date.
+          type: dict
+          contains:
+            data:
+              description: The value.
+              type: float
+            unit:
+              description: Unit of the value.
+              type: str
+            metric:
+              description: Name of the metric that the value measures.
+              type: str
+        reservation:
+          description: Reservation of the license.
+          type: dict
+          contains:
+            data:
+              description: The value.
+              type: float
+            unit:
+              description: Unit of the value.
+              type: str
+            metric:
+              description: Name of the metric that the value measures.
+              type: str
+        usage:
+          description: Usage of the license, averaged over the last day.
+          type: dict
+          contains:
+            data:
+              description: The value.
+              type: float
+            unit:
+              description: Unit of the value.
+              type: str
+            metric:
+              description: Name of the metric that the value measures.
+              type: str
+        quarter_on_demand:
+          description:
+            - Estimated total on-demand usage of the license in the current calendar
+              quarter to date.
+          type: dict
+          contains:
+            data:
+              description: The value.
+              type: float
+            unit:
+              description: Unit of the value.
+              type: str
+            metric:
+              description: Name of the metric that the value measures.
+              type: str
+        resources:
+          description: The resources that operate under the license, keyed by resource name.
+          type: dict
+          contains:
+            resource_type:
+              description: Type of the resource, for example C(arrays), null when Pure1 has none.
+              type: str
+            fqdn:
+              description:
+                - Fully qualified domain name of the resource when it is an array, null
+                  when Pure1 has none.
+              type: str
+            activation_time:
+              description:
+                - Time the resource was activated under the license, as
+                  C(YYYY-MM-DD HH:MM:SS UTC).
+              type: str
+            usage:
+              description: Usage of the resource under the license.
+              type: dict
+              contains:
+                data:
+                  description: The value, null when Pure1 has none.
+                  type: float
+                unit:
+                  description: Unit of the value.
+                  type: str
+                metric:
+                  description: Name of the metric that the value measures.
+                  type: str
+      sample:
+        license1:
+          start_date: "2021-01-01 00:00:00 UTC"
+          expiration_date: "2024-01-01 00:00:00 UTC"
+          last_updated: "2021-06-01 00:00:00 UTC"
+          marketplace_partner: null
+          service_tier: //Block - Performance
+          location:
+            city: Example City
+            state: EX
+            country: EXAMPLE COUNTRY
+          pre_ratio:
+            data: 3.45
+            unit: ""
+          energy_usage: null
+          subscription: subscription1
+          average_on_demand:
+            data: 0.0
+            unit: B
+            metric: subscription_license_on_demand_space
+          reservation:
+            data: 109951162777600.0
+            unit: B
+            metric: subscription_license_reserved_space
+          usage:
+            data: 46729244180480.0
+            unit: B
+            metric: subscription_license_effective_used_space
+          quarter_on_demand:
+            data: 0.0
+            unit: B
+            metric: subscription_license_on_demand_space
+          resources:
+            array1:
+              resource_type: arrays
+              fqdn: array1.example.com
+              activation_time: "2021-01-01 00:00:00 UTC"
+              usage:
+                data: 46729244180480.0
+                unit: B
+                metric: array_effective_used_space
+    contracts:
+      description:
+        - The C(contracts) subset, the support contract of each appliance, keyed by
+          array name.
+      returned: when I(gather_subset) includes C(contracts) or C(all)
+      type: dict
+      contains:
+        contract_start:
+          description:
+            - Start date of the support contract in UTC, as C(YYYY-MM-DD). Null when
+              the record has no start date.
+          returned: when Pure1 has a support contract record for the array
+          type: str
+        contract_end:
+          description:
+            - End date of the support contract in UTC, as C(YYYY-MM-DD). Null when
+              the record has no end date.
+          returned: when Pure1 has a support contract record for the array
+          type: str
+        contract_state:
+          description:
+            - C(Active) up to the end date of the support contract, C(Grace Period)
+              for 30 days after it and C(Expired) after that.
+            - Also C(Expired) when the record has no end date or when Pure1 has no
+              support contract record for the array, see C(contract_found).
+          type: str
+        contract_found:
+          description:
+            - Whether Pure1 returned a support contract record for the array.
+            - Added in version 1.6.0.
+          type: bool
+      sample:
+        array1:
+          contract_start: "2021-01-01"
+          contract_end: "2027-01-01"
+          contract_state: Active
+          contract_found: true
+        array2:
+          contract_state: Expired
+          contract_found: false
+    environmental:
+      description:
+        - The C(environmental) subset, the sustainability assessment of each
+          appliance, keyed by array name.
+      returned: when I(gather_subset) includes C(environmental) or C(all)
+      type: dict
+      contains:
+        reporting_status:
+          description:
+            - Status of the latest assessment as Pure1 reports it, for example
+              C(assessment_ready), C(not_enough_data), C(not_phoning_home) or
+              C(unsupported_purity_version). Null when Pure1 reports none.
+          type: str
+        location:
+          description: Install address of the appliance, empty when Pure1 has none.
+          type: dict
+          contains:
+            longitude:
+              description: Longitude of the address.
+              type: float
+            latitude:
+              description: Latitude of the address.
+              type: float
+            updated:
+              description: Time the address was updated, as C(YYYY-MM-DD HH:MM:SS UTC).
+              type: str
+            address:
+              description: Street address in one line.
+              type: str
+        assessment:
+          description:
+            - The assessment of the appliance, empty unless C(reporting_status) is
+              C(assessment_ready).
+            - An average is taken over the assessment window.
+          type: dict
+          contains:
+            assessment_level:
+              description: One of C(good), C(recommendation) and C(action_required).
+              type: str
+            array_data_reduction:
+              description: Average data reduction ratio.
+              type: float
+            array_total_load:
+              description: Average load as a fraction of 1, null when Pure1 has none.
+              type: float
+            capacity_utilization:
+              description: Average used capacity as a fraction of 1.
+              type: float
+            power_average:
+              description: Average power consumption in watts.
+              type: float
+            power_per_usable_capacity:
+              description: Average power consumption in watts per TiB of usable capacity.
+              type: float
+            power_per_used_space:
+              description: Average power consumption in watts per TiB of used space.
+              type: float
+            power_typical_spec:
+              description: Typical power consumption of the model and configuration in watts.
+              type: float
+            power_peak_spec:
+              description: Peak power consumption of the model and configuration in watts.
+              type: float
+            heat_average:
+              description: Average heat production in BTU per hour.
+              type: float
+            heat_typical_spec:
+              description: Typical heat production of the model and configuration in BTU per hour.
+              type: float
+            heat_peak_spec:
+              description: Peak heat production of the model and configuration in BTU per hour.
+              type: float
+            rack_units:
+              description: Number of rack units the appliance occupies.
+              type: int
+            blades:
+              description: Number of blades, always 0 for a FlashArray.
+              type: int
+            chassis:
+              description: Number of chassis, always 1 for a FlashArray.
+              type: int
+            shelves:
+              description: Number of expansion shelves, always 0 for a FlashBlade.
+              type: int
+            start:
+              description: Start of the assessment window, as C(YYYY-MM-DD HH:MM:SS UTC).
+              type: str
+            end:
+              description: End of the assessment window, as C(YYYY-MM-DD HH:MM:SS UTC).
+              type: str
+        insights:
+          description: The sustainability insights that Pure1 has for the appliance.
+          type: list
+          elements: dict
+          contains:
+            fqdn:
+              description: Fully qualified domain name of the appliance.
+              type: str
+            type:
+              description: Type of the insight.
+              type: str
+            severity:
+              description: Severity of the insight.
+              type: str
+            insight_data:
+              description: Data of the insight, as Pure1 gives it.
+              type: dict
+      sample:
+        array1:
+          reporting_status: assessment_ready
+          location:
+            longitude: -122.1
+            latitude: 37.4
+            updated: "2021-01-01 00:00:00 UTC"
+            address: 1 Main Street, Example City
+          assessment:
+            assessment_level: good
+            array_data_reduction: 4.5
+            array_total_load: 0.25
+            capacity_utilization: 0.75
+            power_average: 512.5
+            power_per_usable_capacity: 1.5
+            power_per_used_space: 2.5
+            power_typical_spec: 900.0
+            power_peak_spec: 1200.0
+            heat_average: 1748.5
+            heat_typical_spec: 3000.0
+            heat_peak_spec: 4000.0
+            rack_units: 3
+            blades: 0
+            chassis: 1
+            shelves: 0
+            start: "2021-01-01 00:00:00 UTC"
+            end: "2021-01-08 00:00:00 UTC"
+          insights:
+            - fqdn: array1.example.com
+              type: not_enough_workloads
+              severity: low
+              insight_data: {}
+    invoices:
+      description:
+        - The C(invoices) subset, the invoices of the organization, keyed by invoice
+          number.
+      returned: when I(gather_subset) includes C(invoices) or C(all)
+      type: dict
+      contains:
+        status:
+          description: Status of the invoice, for example C(open) or C(paid).
+          type: str
+        amount:
+          description: Total amount of the invoice, 0 when Pure1 gives none.
+          type: float
+        date:
+          description: Date of issue in UTC, as C(YYYY-MM-DD).
+          type: str
+        due_date:
+          description: Date the payment is due in UTC, as C(YYYY-MM-DD).
+          type: str
+        ship_date:
+          description: Date of shipment in UTC, as C(YYYY-MM-DD).
+          type: str
+        payment_terms:
+          description: Payment terms of the invoice.
+          type: str
+        sales_rep:
+          description: Sales representative who issued the invoice.
+          type: str
+        partner_po:
+          description: Purchase order number of the partner.
+          type: str
+        end_user_po:
+          description: Purchase order number of the end user.
+          type: str
+        end_user_name:
+          description: Name of the end user.
+          type: str
+        subscription_id:
+          description: ID of the subscription of the invoice.
+          type: str
+        subscription_name:
+          description: Name of the subscription of the invoice.
+          type: str
+        lines:
+          description: The line items of the invoice.
+          type: list
+          elements: dict
+          contains:
+            item:
+              description: Name of the item.
+              type: str
+            quantity:
+              description: Quantity of the item, 0 when Pure1 gives none.
+              type: int
+            description:
+              description: Description of the item.
+              type: str
+            start_date:
+              description: Start date of the item in UTC, as C(YYYY-MM-DD).
+              type: str
+            end_date:
+              description: End date of the item in UTC, as C(YYYY-MM-DD).
+              type: str
+            components:
+              description: The components of the item, null or empty when it has none.
+              type: list
+              elements: dict
+              contains:
+                item:
+                  description: Name of the component.
+                  type: str
+                quantity:
+                  description: Quantity of the component.
+                  type: int
+                description:
+                  description: Description of the component.
+                  type: str
+            unit_price:
+              description: Unit price of the item, 0 when Pure1 gives none.
+              type: float
+            amount:
+              description: Total price of the item, 0 when Pure1 gives none.
+              type: float
+            tax_percentage:
+              description:
+                - Tax rate of the item as a fraction of 1 (0.1 is 10 percent), null when
+                  the item has no tax.
+              type: float
+            tax_amount:
+              description: Total tax of the item, null when the item has no tax.
+              type: float
+            tax_exemption_statement:
+              description: Tax exemption statement of the item.
+              type: str
+      sample:
+        "1234567":
+          status: paid
+          amount: 2200.0
+          date: "2021-01-01"
+          due_date: "2021-01-31"
+          ship_date: "2021-01-02"
+          payment_terms: NET30
+          sales_rep: Jane Doe
+          partner_po: PO-1
+          end_user_po: PO-2
+          end_user_name: Example Org
+          subscription_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+          subscription_name: subscription1
+          lines:
+            - item: Evergreen//One
+              quantity: 2
+              description: Storage service
+              start_date: "2021-01-01"
+              end_date: "2021-03-31"
+              components:
+                - item: Reserved capacity
+                  quantity: 1
+                  description: Reserved capacity in TiB
+              unit_price: 1000.0
+              amount: 2000.0
+              tax_percentage: 0.1
+              tax_amount: 200.0
+              tax_exemption_statement: null
 """
 
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
+    filter_string,
     get_pure1,
     pure1_argument_spec,
+    pure1_error_text,
 )
-import datetime
 import time
 
 
@@ -121,6 +893,17 @@ def format_utc(epoch):
     return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(epoch / 1000))
 
 
+def format_utc_date(epoch):
+    """Return a millisecond epoch as a UTC date string, None if it is not set
+
+    Pure1 gives a date as 00:00 UTC of that day, so local time would show
+    the day before on a host west of UTC.
+    """
+    if not epoch:
+        return None
+    return time.strftime("%Y-%m-%d", time.gmtime(epoch / 1000))
+
+
 def current_metric_dict(metric):
     """Return a license metric as plain values, None for what is not set"""
     return {
@@ -135,11 +918,12 @@ def generate_default_dict(pure_1):
     fb_count = fa_count = os_count = 0
     appliances = list(checked(pure_1.get_arrays()).items)
     for appliance in range(0, len(appliances)):
-        if appliances[appliance].os in ["Purity//FA", "Purity"]:
+        array_os = getattr(appliances[appliance], "os", None)
+        if array_os in ["Purity//FA", "Purity"]:
             fa_count += 1
-        elif appliances[appliance].os == "Purity//FB":
+        elif array_os == "Purity//FB":
             fb_count += 1
-        elif appliances[appliance].os == "Elasticity":
+        elif array_os == "Elasticity":
             os_count += 1
     default_info["FlashArrays"] = fa_count
     default_info["FlashBlades"] = fb_count
@@ -159,34 +943,6 @@ def generate_default_dict(pure_1):
         pure_1.get_object_store_accounts()
     ).total_item_count
     return default_info
-
-
-def generate_subscription_assets_dict(pure_1):
-    assets_info = {}
-    assets = list(pure_1.get_subscription_assets().items)
-    if assets:
-        for asset in range(0, len(assets)):
-            name = assets[asset].name
-            activation = time.strftime(
-                "%Y-%m-%d %H:%M:%S UTC",
-                time.gmtime(assets[asset].activation_date / 1000),
-            )
-            assets_info[name] = {
-                "install_location": assets[asset].install_location,
-                "activation_date": activation,
-                "version": assets[asset].version,
-                "model": assets[asset].model,
-                "chassis_sn": assets[asset].chassis_serial_number,
-                "effective_use": assets[asset].effective_use,
-                "utilization": assets[asset].utilization,
-                "total_usable": assets[asset].total_usable,
-                "total_reduction": assets[asset].total_reduction,
-                "subscription_name": assets[asset].subscription.name,
-                "subscription_id": assets[asset].subscription.id,
-                "license_name": assets[asset].license.name,
-                "license_id": assets[asset].license.id,
-            }
-    return assets_info
 
 
 def generate_subscription_licenses_dict(pure_1):
@@ -260,19 +1016,15 @@ def generate_subscriptions_dict(pure_1):
     if subscriptions:
         for subscription in range(0, len(subscriptions)):
             name = subscriptions[subscription].name
-            start_time = time.strftime(
-                "%Y-%m-%d %H:%M:%S UTC",
-                time.gmtime(subscriptions[subscription].start_date / 1000),
-            )
-            end_time = time.strftime(
-                "%Y-%m-%d %H:%M:%S UTC",
-                time.gmtime(subscriptions[subscription].expiration_date / 1000),
-            )
             subscriptions_info[name] = {
-                "start_date": start_time,
-                "expiration_date": end_time,
-                "service": subscriptions[subscription].service,
-                "status": subscriptions[subscription].status,
+                "start_date": format_utc(
+                    getattr(subscriptions[subscription], "start_date", None)
+                ),
+                "expiration_date": format_utc(
+                    getattr(subscriptions[subscription], "expiration_date", None)
+                ),
+                "service": getattr(subscriptions[subscription], "service", None),
+                "status": getattr(subscriptions[subscription], "status", None),
                 "org_name": getattr(
                     getattr(subscriptions[subscription], "organization", None),
                     "name",
@@ -294,90 +1046,56 @@ def generate_esg_dict(module, pure_1):
     appliances = list(checked(pure_1.get_assessment_sustainability_arrays()).items)
     for appliance in range(0, len(appliances)):
         name = appliances[appliance].name
+        status = getattr(appliances[appliance], "reporting_status", None)
         esg_info[name] = {
             "insights": [],
             "location": {},
             "assessment": {},
-            "reporting_status": {},
+            "reporting_status": status,
         }
-        if getattr(appliances[appliance], "install_address", False):
+        address = getattr(appliances[appliance], "install_address", None)
+        if address:
+            geolocation = getattr(address, "geolocation", None)
             esg_info[name]["location"] = {
-                "longitude": getattr(
-                    appliances[appliance].install_address.geolocation,
-                    "longitude",
-                    None,
-                ),
-                "latitude": getattr(
-                    appliances[appliance].install_address.geolocation,
-                    "latitude",
-                    None,
-                ),
-                "updated": getattr(
-                    appliances[appliance].install_address,
-                    "updated",
-                    None,
-                ),
-                "address": getattr(
-                    appliances[appliance].install_address,
-                    "street_address",
-                    None,
-                ),
+                "longitude": getattr(geolocation, "longitude", None),
+                "latitude": getattr(geolocation, "latitude", None),
+                "updated": getattr(address, "updated", None),
+                "address": getattr(address, "street_address", None),
             }
             if esg_info[name]["location"]["updated"]:
                 esg_info[name]["location"]["updated"] = time.strftime(
                     "%Y-%m-%d %H:%M:%S UTC",
                     time.gmtime(esg_info[name]["location"]["updated"] / 1000),
                 )
-        if appliances[appliance].reporting_status != "assessment_ready":
-            esg_info[name]["reporting_status"] = appliances[appliance].reporting_status
-        else:
+        assessment = getattr(appliances[appliance], "assessment", None)
+        if status == "assessment_ready" and assessment is not None:
             esg_info[name]["assessment"] = {
                 "array_data_reduction": getattr(
-                    appliances[appliance].assessment, "array_data_reduction", None
+                    assessment, "array_data_reduction", None
                 ),
-                "assessment_level": getattr(
-                    appliances[appliance].assessment, "assessment_level", None
-                ),
-                "blades": getattr(appliances[appliance].assessment, "blades", None),
+                "assessment_level": getattr(assessment, "assessment_level", None),
+                "blades": getattr(assessment, "blades", None),
                 "capacity_utilization": getattr(
-                    appliances[appliance].assessment, "capacity_utilization", None
+                    assessment, "capacity_utilization", None
                 ),
-                "chassis": getattr(appliances[appliance].assessment, "chassis", None),
-                "power_average": getattr(
-                    appliances[appliance].assessment, "power_average", None
-                ),
+                "chassis": getattr(assessment, "chassis", None),
+                "power_average": getattr(assessment, "power_average", None),
                 "power_per_usable_capacity": getattr(
-                    appliances[appliance].assessment, "power_per_usable_capacity", None
+                    assessment, "power_per_usable_capacity", None
                 ),
                 "power_per_used_space": getattr(
-                    appliances[appliance].assessment, "power_per_used_space", None
+                    assessment, "power_per_used_space", None
                 ),
-                "power_typical_spec": getattr(
-                    appliances[appliance].assessment, "power_typical_spec", None
-                ),
-                "power_peak_spec": getattr(
-                    appliances[appliance].assessment, "power_peak_spec", None
-                ),
-                "heat_typical_spec": getattr(
-                    appliances[appliance].assessment, "heat_typical_spec", None
-                ),
-                "heat_peak_spec": getattr(
-                    appliances[appliance].assessment, "heat_peak_spec", None
-                ),
-                "heat_average": getattr(
-                    appliances[appliance].assessment, "heat_average", None
-                ),
-                "rack_units": getattr(
-                    appliances[appliance].assessment, "rack_units", None
-                ),
-                "shelves": getattr(appliances[appliance].assessment, "shelves", None),
-                "array_total_load": getattr(
-                    appliances[appliance].assessment, "array_total_load", None
-                ),
-                "start": getattr(
-                    appliances[appliance].assessment, "interval_start", None
-                ),
-                "end": getattr(appliances[appliance].assessment, "interval_end", None),
+                "power_typical_spec": getattr(assessment, "power_typical_spec", None),
+                "power_peak_spec": getattr(assessment, "power_peak_spec", None),
+                "heat_typical_spec": getattr(assessment, "heat_typical_spec", None),
+                "heat_peak_spec": getattr(assessment, "heat_peak_spec", None),
+                "heat_average": getattr(assessment, "heat_average", None),
+                "rack_units": getattr(assessment, "rack_units", None),
+                "shelves": getattr(assessment, "shelves", None),
+                "array_total_load": getattr(assessment, "array_total_load", None),
+                "start": getattr(assessment, "interval_start", None),
+                "end": getattr(assessment, "interval_end", None),
             }
             if esg_info[name]["assessment"]["start"]:
                 esg_info[name]["assessment"]["start"] = time.strftime(
@@ -392,25 +1110,42 @@ def generate_esg_dict(module, pure_1):
     insights = list(
         checked(pure_1.get_assessment_sustainability_insights_arrays()).items
     )
+    unnamed = 0
     for insight in range(0, len(insights)):
-        name = getattr(insights[insight].resource, "name", None)
-        if name:
-            esg_info[name]["insights"].append(
-                {
-                    "fqdn": insights[insight].resource.fqdn,
-                    "type": insights[insight].type,
-                    "severity": insights[insight].severity,
-                    "insight_data": insights[insight].additional_data,
-                }
-            )
+        resource = getattr(insights[insight], "resource", None)
+        name = getattr(resource, "name", None)
+        if not name:
+            unnamed += 1
+            continue
+        # Pure1 can report an insight for an array that is not in its list
+        esg_info.setdefault(
+            name,
+            {
+                "insights": [],
+                "location": {},
+                "assessment": {},
+                "reporting_status": None,
+            },
+        )
+        esg_info[name]["insights"].append(
+            {
+                "fqdn": getattr(resource, "fqdn", None),
+                "type": getattr(insights[insight], "type", None),
+                "severity": getattr(insights[insight], "severity", None),
+                "insight_data": getattr(insights[insight], "additional_data", None),
+            }
+        )
+    if unnamed:
+        module.warn(
+            "Insights without an array name were left out of the "
+            "environmental subset: {0}.".format(unnamed)
+        )
     return esg_info
 
 
 def generate_contract_dict(pure_1):
     contract_info = {}
     grace_period = 2592000000  # 30 days in ms
-    contract_start_epoch = None
-    contract_end_epoch = None
     current_date = int(time.time() * 1000)
     appliances = list(checked(pure_1.get_arrays()).items)
     for appliance in range(0, len(appliances)):
@@ -420,29 +1155,24 @@ def generate_contract_dict(pure_1):
         contract_data = list(
             checked(
                 pure_1.get_arrays_support_contracts(
-                    filter="resource.name='" + name + "'"
+                    filter="resource.name=" + filter_string(name)
                 )
             ).items
         )
         if contract_data:
             contract_start_epoch = getattr(contract_data[0], "start_date", None)
             contract_end_epoch = getattr(contract_data[0], "end_date", None)
-            if contract_start_epoch:
-                contract_start = datetime.datetime.fromtimestamp(
-                    int(contract_start_epoch / 1000)
-                ).strftime("%Y-%m-%d")
-            if contract_end_epoch:
-                contract_end = datetime.datetime.fromtimestamp(
-                    int(contract_end_epoch / 1000)
-                ).strftime("%Y-%m-%d")
-            contract_info[name]["contract_start"] = contract_start
-            contract_info[name]["contract_end"] = contract_end
+            contract_info[name]["contract_start"] = format_utc_date(
+                contract_start_epoch
+            )
+            contract_info[name]["contract_end"] = format_utc_date(contract_end_epoch)
             if contract_end_epoch:
                 if current_date <= contract_end_epoch:
                     contract_state = "Active"
                 elif contract_end_epoch + grace_period >= current_date:
                     contract_state = "Grace Period"
         contract_info[name]["contract_state"] = contract_state
+        contract_info[name]["contract_found"] = bool(contract_data)
     return contract_info
 
 
@@ -453,39 +1183,20 @@ def generate_invoices_dict(module, pure_1):
         invoices = list(res.items)
         for invoice in range(0, len(invoices)):
             name = invoices[invoice].id
-            # py-pure-client names the field var_date, older releases _date
-            invoice_date = getattr(invoices[invoice], "var_date", None)
-            if not invoice_date:
-                invoice_date = getattr(invoices[invoice], "_date", None)
-            invoice_due_date = getattr(invoices[invoice], "due_date", None)
-            invoice_ship_date = getattr(invoices[invoice], "ship_date", None)
-            if invoice_date:
-                inv_date = datetime.datetime.fromtimestamp(
-                    int(invoice_date / 1000)
-                ).strftime("%Y-%m-%d")
-            else:
-                inv_date = None
-            if invoice_due_date:
-                inv_due_date = datetime.datetime.fromtimestamp(
-                    int(invoice_due_date / 1000)
-                ).strftime("%Y-%m-%d")
-            else:
-                inv_due_date = None
-            if invoice_ship_date:
-                inv_ship_date = datetime.datetime.fromtimestamp(
-                    int(invoice_ship_date / 1000)
-                ).strftime("%Y-%m-%d")
-            else:
-                inv_ship_date = None
             subscription = getattr(invoices[invoice], "subscription", None)
 
             invoices_info[name] = {
                 "lines": [],
                 "status": getattr(invoices[invoice], "status", None),
                 "amount": getattr(invoices[invoice], "amount", 0),
-                "date": inv_date,
-                "due_date": inv_due_date,
-                "ship_date": inv_ship_date,
+                # py-pure-client names the date of the invoice var_date
+                "date": format_utc_date(getattr(invoices[invoice], "var_date", None)),
+                "due_date": format_utc_date(
+                    getattr(invoices[invoice], "due_date", None)
+                ),
+                "ship_date": format_utc_date(
+                    getattr(invoices[invoice], "ship_date", None)
+                ),
                 "payment_terms": getattr(invoices[invoice], "payment_terms", None),
                 "sales_rep": getattr(invoices[invoice], "sales_representative", None),
                 "partner_po": getattr(
@@ -500,22 +1211,6 @@ def generate_invoices_dict(module, pure_1):
             }
             lines = getattr(invoices[invoice], "lines", None) or []
             for line in range(0, len(lines)):
-                line_start_date = getattr(
-                    invoices[invoice].lines[line], "start_date", None
-                )
-                line_end_date = getattr(invoices[invoice].lines[line], "end_date", None)
-                if line_start_date:
-                    start_date = datetime.datetime.fromtimestamp(
-                        int(line_start_date / 1000)
-                    ).strftime("%Y-%m-%d")
-                else:
-                    start_date = None
-                if line_end_date:
-                    end_date = datetime.datetime.fromtimestamp(
-                        int(line_end_date / 1000)
-                    ).strftime("%Y-%m-%d")
-                else:
-                    end_date = None
                 tax = getattr(invoices[invoice].lines[line], "tax", None)
                 components = getattr(invoices[invoice].lines[line], "components", None)
                 if components:
@@ -536,8 +1231,12 @@ def generate_invoices_dict(module, pure_1):
                         "description": getattr(
                             invoices[invoice].lines[line], "description", None
                         ),
-                        "start_date": start_date,
-                        "end_date": end_date,
+                        "start_date": format_utc_date(
+                            getattr(invoices[invoice].lines[line], "start_date", None)
+                        ),
+                        "end_date": format_utc_date(
+                            getattr(invoices[invoice].lines[line], "end_date", None)
+                        ),
                         "components": components,
                         "unit_price": getattr(
                             invoices[invoice].lines[line], "unit_price", 0
@@ -588,6 +1287,24 @@ def get_latest_metric(module, pure_1, name, metric):
     return point[1]
 
 
+def get_tags(module, pure_1, name):
+    """Return the tags of an array, none with a warning if they are refused"""
+    res = pure_1.get_arrays_tags(resource_names=[name])
+    if res.status_code != 200:
+        module.warn("Tags not collected for {0}. {1}".format(name, response_error(res)))
+        return []
+    tags = list(res.items)
+    return [
+        {
+            "key": tags[tag].key,
+            "value": tags[tag].value,
+            "org_id": getattr(tags[tag], "tag_organization_id", None),
+            "namespace": getattr(tags[tag], "namespace", None),
+        }
+        for tag in range(0, len(tags))
+    ]
+
+
 def generate_appliances_dict(module, pure_1):
     names_info = {"FlashArray": {}, "FlashBlade": {}, "ObjectEngine": {}}
     appliances = list(checked(pure_1.get_arrays()).items)
@@ -597,25 +1314,14 @@ def generate_appliances_dict(module, pure_1):
             fqdn = appliances[appliance].fqdn
         except AttributeError:
             fqdn = ""
-        if appliances[appliance].os in ["Purity//FA", "Purity"]:
+        array_os = getattr(appliances[appliance], "os", None)
+        if array_os in ["Purity//FA", "Purity"]:
             names_info["FlashArray"][name] = {
-                "os_version": appliances[appliance].version,
-                "model": appliances[appliance].model,
+                "os_version": getattr(appliances[appliance], "version", None),
+                "model": getattr(appliances[appliance], "model", None),
                 "fqdn": fqdn,
-                "tags": [],
+                "tags": get_tags(module, pure_1, name),
             }
-            res = pure_1.get_arrays_tags(resource_names=[name])
-            if res.status_code == 200:
-                tags = list(res.items)
-                for tag in range(0, len(tags)):
-                    names_info["FlashArray"][name]["tags"].append(
-                        {
-                            "key": tags[tag].key,
-                            "value": tags[tag].value,
-                            "org_id": getattr(tags[tag], "tag_organization_id", None),
-                            "namespace": getattr(tags[tag], "namespace", None),
-                        }
-                    )
             value = get_latest_metric(module, pure_1, name, "array_read_bandwidth")
             if value is not None:
                 names_info["FlashArray"][name]["bandwidth (read) [MB/s]"] = round(
@@ -645,44 +1351,20 @@ def generate_appliances_dict(module, pure_1):
             value = get_latest_metric(module, pure_1, name, "array_total_load")
             if value is not None:
                 names_info["FlashArray"][name]["load [%]"] = round(value * 100, 3)
-        elif appliances[appliance].os == "Elasticity":
+        elif array_os == "Elasticity":
             names_info["ObjectEngine"][name] = {
-                "os_version": appliances[appliance].version,
-                "model": appliances[appliance].model,
+                "os_version": getattr(appliances[appliance], "version", None),
+                "model": getattr(appliances[appliance], "model", None),
                 "fqdn": fqdn,
-                "tags": [],
+                "tags": get_tags(module, pure_1, name),
             }
-            res = pure_1.get_arrays_tags(resource_names=[name])
-            if res.status_code == 200:
-                tags = list(res.items)
-                for tag in range(0, len(tags)):
-                    names_info["ObjectEngine"][name]["tags"].append(
-                        {
-                            "key": tags[tag].key,
-                            "value": tags[tag].value,
-                            "org_id": getattr(tags[tag], "tag_organization_id", None),
-                            "namespace": getattr(tags[tag], "namespace", None),
-                        }
-                    )
-        elif appliances[appliance].os == "Purity//FB":
+        elif array_os == "Purity//FB":
             names_info["FlashBlade"][name] = {
-                "os_version": appliances[appliance].version,
-                "model": appliances[appliance].model,
+                "os_version": getattr(appliances[appliance], "version", None),
+                "model": getattr(appliances[appliance], "model", None),
                 "fqdn": fqdn,
-                "tags": [],
+                "tags": get_tags(module, pure_1, name),
             }
-            res = pure_1.get_arrays_tags(resource_names=[name])
-            if res.status_code == 200:
-                tags = list(res.items)
-                for tag in range(0, len(tags)):
-                    names_info["FlashBlade"][name]["tags"].append(
-                        {
-                            "key": tags[tag].key,
-                            "value": tags[tag].value,
-                            "org_id": getattr(tags[tag], "tag_organization_id", None),
-                            "namespace": getattr(tags[tag], "namespace", None),
-                        }
-                    )
             value = get_latest_metric(module, pure_1, name, "array_read_bandwidth")
             if value is not None:
                 names_info["FlashBlade"][name]["bandwidth (read) [MB/s]"] = round(
@@ -710,11 +1392,7 @@ def generate_appliances_dict(module, pure_1):
                     value / 1000, 2
                 )
         else:
-            module.warn(
-                "Unknown operating system detected: {0}.".format(
-                    appliances[appliance].os
-                )
-            )
+            module.warn("Unknown operating system detected: {0}.".format(array_os))
     return names_info
 
 
@@ -722,7 +1400,8 @@ def collect_subset(module, subset, generate, *args):
     """Return one section of a subset
 
     A 403 answer returns the section empty with a warning, any other
-    error answer fails the task with the API message.
+    error answer fails the task with the API message. An error raised by
+    the SDK or by the transport fails the task with its type and text.
     """
     try:
         return generate(*args)
@@ -737,6 +1416,12 @@ def collect_subset(module, subset, generate, *args):
         module.fail_json(
             msg="Failed to collect the {0} subset. {1}".format(
                 subset, response_error(res)
+            )
+        )
+    except Exception as error:
+        module.fail_json(
+            msg="Failed to collect the {0} subset. {1}".format(
+                subset, pure1_error_text(module, error)
             )
         )
 
@@ -763,8 +1448,8 @@ def main():
     subset_test = (test in valid_subsets for test in subset)
     if not all(subset_test):
         module.fail_json(
-            msg="value must gather_subset must be one or more of: %s, got: %s"
-            % (",".join(valid_subsets), ",".join(subset))
+            msg="gather_subset must be one or more of: %s, got: %s"
+            % (", ".join(valid_subsets), ", ".join(subset))
         )
 
     info = {}
@@ -784,7 +1469,6 @@ def main():
         info["subscription_licenses"] = collect_subset(
             module, "subscriptions", generate_subscription_licenses_dict, pure_1
         )
-        # info["subscription_assets"] = generate_subscription_assets_dict(pure_1)
     if "contracts" in subset or "all" in subset:
         info["contracts"] = collect_subset(
             module, "contracts", generate_contract_dict, pure_1
@@ -794,7 +1478,9 @@ def main():
             module, "environmental", generate_esg_dict, module, pure_1
         )
     if "invoices" in subset or "all" in subset:
-        info["invoices"] = generate_invoices_dict(module, pure_1)
+        info["invoices"] = collect_subset(
+            module, "invoices", generate_invoices_dict, module, pure_1
+        )
 
     module.exit_json(changed=False, pure1_info=info)
 

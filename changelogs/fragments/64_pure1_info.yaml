@@ -1,0 +1,11 @@
+bugfixes:
+  - "pure1_info - ``reporting_status`` of the ``environmental`` subset is the status string for every appliance; it was an empty dictionary for an appliance that is ready for assessment."
+  - "pure1_info - a failed tag call in the ``appliances`` subset now gives a warning that names the array and the status."
+  - "pure1_info - a record that Pure1 returns without one of its values gives null for it instead of a traceback, in the ``minimum``, ``appliances``, ``subscriptions``, ``contracts`` and ``environmental`` subsets."
+  - "pure1_info - a support contract record without a date no longer shows the date of the previous array."
+  - "pure1_info - an error raised by py-pure-client now fails the task with one line that names the subset instead of a traceback."
+  - "pure1_info - contract and invoice dates are given in UTC; on a host west of UTC they were one day early."
+  - "pure1_info - the documentation says what the ``minimum`` subset returns, the examples are valid tasks and every return key is documented, with units where they apply."
+  - "pure1_info - the message for an invalid ``gather_subset`` value is corrected."
+minor_changes:
+  - "pure1_info - each entry of ``contracts`` has the new key ``contract_found``, true when Pure1 returned a support contract record for the array."
