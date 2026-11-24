@@ -8,26 +8,21 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
-ANSIBLE_METADATA = {
-    "metadata_version": "1.1",
-    "status": ["preview"],
-    "supported_by": "community",
-}
-
 DOCUMENTATION = r"""
 ---
 module: pure1_alerts
 version_added: '1.1.0'
 short_description: Collect array alerts from Pure1 based on severity
 description:
-  - Collect array alerts based on severity. Select whole fleet or by appliance
+  - Collect array alerts based on severity. Select all appliances or by appliance
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 options:
   name:
     description:
-      - Name of appliance to obtain alert drtails.
-      - If not provided, the whole fleet with be used
+      - Name of appliance to obtain alert details.
+      - If not provided, all appliances will be used
+      - The name is not looked up. A name that Pure1 does not know matches no alert.
     type: str
   severity:
     description: Severity of alerts to select
@@ -35,33 +30,141 @@ options:
     choices: [ info, warning, critical, hidden ]
     required: true
   state:
-    description: Stae of the alert
+    description:
+      - State of the alert
+      - The choice C(closing) selects the alerts in the state of that name. Added in version 1.6.0.
     type: str
     default: open
-    choices: [ open, closed ]
+    choices: [ open, closing, closed ]
 extends_documentation_fragment:
   - everpure.pure1.everpure.p1
 """
 
 EXAMPLES = r"""
-- name: collect critical alerts for arrayt foo
+- name: Collect critical alerts for array foo
   everpure.pure1.pure1_alerts:
     name: foo
     severity: critical
+    app_id: pure1:apikey:dssf2331sd
+    key_file: /home/user/private.pem
+  register: critical_alerts
+
+- name: Show the code and the summary of each critical alert for array foo
+  ansible.builtin.debug:
+    msg: "{{ item.value.code }}: {{ item.value.summary }}"
+  loop: "{{ critical_alerts.alert_info | dict2items }}"
+
+- name: Collect the warning alerts in state closing for all appliances
+  everpure.pure1.pure1_alerts:
+    severity: warning
+    state: closing
+  register: closing_alerts
+
+- name: Show the appliances that have such an alert
+  ansible.builtin.debug:
+    msg: "{{ closing_alerts.alert_info | dict2items | map(attribute='value.appliance_name') | unique }}"
 """
 
 RETURN = r"""
 alert_info:
-  description: Returns information on appliance alerts
+  description:
+    - The alerts that match, keyed by a running number that starts at 0.
+      A registered result holds the numbers as strings.
+    - An empty dictionary when no alert matches.
+    - A value that Pure1 does not give is null, except for the times.
+      A time that the alert does not have is left out, and so is its _epoch key.
   returned: always
   type: dict
+  contains:
+    component_type:
+      description: Type of the component alerted about
+      returned: always
+      type: str
+    component_name:
+      description: Name of the component alerted about
+      returned: always
+      type: str
+    code:
+      description: Code associated with the alert
+      returned: always
+      type: int
+    category:
+      description: Category of the alert
+      returned: always
+      type: str
+    summary:
+      description: Summary of the alert
+      returned: always
+      type: str
+    created:
+      description: Time when the alert was created, in the time zone of the host that runs the module
+      returned: when the alert has that time
+      type: str
+    created_epoch:
+      description:
+        - Time when the alert was created, in milliseconds since the UNIX epoch
+        - Added in version 1.6.0.
+      returned: when the alert has that time
+      type: int
+    updated:
+      description: Time when the alert was last updated, in the time zone of the host that runs the module
+      returned: when the alert has that time
+      type: str
+    updated_epoch:
+      description:
+        - Time when the alert was last updated, in milliseconds since the UNIX epoch
+        - Added in version 1.6.0.
+      returned: when the alert has that time
+      type: int
+    notified:
+      description: Time when the user was notified of the alert, in the time zone of the host that runs the module
+      returned: when the alert has that time
+      type: str
+    notified_epoch:
+      description:
+        - Time when the user was notified of the alert, in milliseconds since the UNIX epoch
+        - Added in version 1.6.0.
+      returned: when the alert has that time
+      type: int
+    closed:
+      description: Time when the alert was closed, in the time zone of the host that runs the module
+      returned: when the alert has that time
+      type: str
+    closed_epoch:
+      description:
+        - Time when the alert was closed, in milliseconds since the UNIX epoch
+        - Added in version 1.6.0.
+      returned: when the alert has that time
+      type: int
+    appliance_name:
+      description: Name of the first array of the alert, null for an alert without an array
+      returned: when name is not set
+      type: str
+  sample:
+    "0":
+      component_type: hardware
+      component_name: ct0.fan0
+      code: 42
+      category: array
+      summary: Fan failure
+      created: "2026-08-21 16:41:39"
+      created_epoch: 1787330499000
+      updated: "2026-08-21 16:41:40"
+      updated_epoch: 1787330500000
+      notified: "2026-08-21 16:41:41"
+      notified_epoch: 1787330501000
+      closed: "2026-08-21 16:43:02"
+      closed_epoch: 1787330582000
+      appliance_name: array1
 """
 
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
+    filter_string,
     get_pure1,
     pure1_argument_spec,
+    pure1_items,
 )
 import time
 
@@ -76,7 +179,9 @@ def main():
                 choices=["info", "warning", "critical", "hidden"],
                 required=True,
             ),
-            state=dict(default="open", type="str", choices=["open", "closed"]),
+            state=dict(
+                default="open", type="str", choices=["open", "closing", "closed"]
+            ),
         )
     )
 
@@ -84,71 +189,44 @@ def main():
     pure_1 = get_pure1(module)
     index = 0
     alert_info = {}
+    alert_filter = (
+        "severity="
+        + filter_string(module.params["severity"])
+        + " and state="
+        + filter_string(module.params["state"])
+    )
     if module.params["name"]:
-        alerts = list(
-            pure_1.get_alerts(
-                filter="arrays.name='"
-                + module.params["name"]
-                + "' and severity='"
-                + module.params["severity"]
-                + "' and state='"
-                + module.params["state"]
-                + "'"
-            ).items
+        alert_filter = (
+            "arrays.name="
+            + filter_string(module.params["name"])
+            + " and "
+            + alert_filter
         )
-        if not alerts:
-            module.fail_json(
-                msg="No {0} alerts of severity {1} for array {2} found.".format(
-                    module.params["state"],
-                    module.params["severity"],
-                    module.params["name"],
-                )
-            )
-    else:
-        alerts = list(
-            pure_1.get_alerts(
-                filter="severity='"
-                + module.params["severity"]
-                + "' and state='"
-                + module.params["state"]
-                + "'"
-            ).items
-        )
-        if not alerts:
-            module.fail_json(
-                msg="Failed to get any {0} alerts of severity {1} for the fleet.".format(
-                    module.params["state"], module.params["severity"]
-                )
-            )
+    alerts = pure1_items(
+        module, "get_alerts", lambda: pure_1.get_alerts(filter=alert_filter)
+    )
 
     for alert in range(0, len(alerts)):
         alert_info[index] = {
             "component_type": getattr(alerts[alert], "component_type", None),
             "component_name": getattr(alerts[alert], "component_name", None),
-            "code": alerts[alert].code,
+            "code": getattr(alerts[alert], "code", None),
             "category": getattr(alerts[alert], "category", None),
-            "summary": alerts[alert].summary,
+            "summary": getattr(alerts[alert], "summary", None),
         }
-        if getattr(alerts[alert], "created", 0) != 0:
-            alert_info[index]["created"] = time.strftime(
-                "%Y-%m-%d %H:%M:%S", time.localtime(int(alerts[alert].created) / 1000)
-            )
-        if getattr(alerts[alert], "updated", 0) != 0:
-            alert_info[index]["updated"] = time.strftime(
-                "%Y-%m-%d %H:%M:%S", time.localtime(int(alerts[alert].updated) / 1000)
-            )
-        if getattr(alerts[alert], "notified", 0) != 0:
-            alert_info[index]["notified"] = time.strftime(
-                "%Y-%m-%d %H:%M:%S", time.localtime(int(alerts[alert].notified) / 1000)
-            )
-        if module.params["state"] == "closed":
-            if getattr(alerts[alert], "closed", 0) != 0:
-                alert_info[index]["closed"] = time.strftime(
-                    "%Y-%m-%d %H:%M:%S",
-                    time.localtime(int(alerts[alert].closed) / 1000),
+        for field in ("created", "updated", "notified", "closed"):
+            # milliseconds since the epoch, as Pure1 gives the time
+            stamp = getattr(alerts[alert], field, 0)
+            if stamp != 0:
+                alert_info[index][field] = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(int(stamp) / 1000)
                 )
+                alert_info[index][field + "_epoch"] = stamp
         if not module.params["name"]:
-            alert_info[index]["appliance_name"] = alerts[alert].arrays[0].name
+            arrays = getattr(alerts[alert], "arrays", None) or []
+            alert_info[index]["appliance_name"] = (
+                getattr(arrays[0], "name", None) if arrays else None
+            )
         index += 1
 
     module.exit_json(changed=False, alert_info=alert_info)
