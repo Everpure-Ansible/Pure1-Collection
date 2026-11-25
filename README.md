@@ -138,6 +138,7 @@ Per-release notes can be found on the
 - pure1_recommendations - Collect the recommendations of Pure1
 - pure1_replica_links - Collect replica links and replication targets from Pure1
 - pure1_security - Collect the security assessment of arrays from Pure1
+- pure1_simulation - Collect the projected load and capacity of arrays from Pure1
 - pure1_topology_groups - Collect the topology groups of fleets from Pure1
 - pure1_volume_metrics - Get FlashArray volume metrics from Pure1
 - pure1_volumes - Get FlashArray volume information from Pure1
