@@ -30,10 +30,10 @@ options:
   array:
     description:
       - Names of the arrays whose components are returned. All arrays when
-        not set.
+        not set or empty.
       - A name is matched without regard to case, and the result carries the
         name as Pure1 spells it.
-      - The task fails when Pure1 does not know one of the names.
+      - A name that Pure1 does not know fails the task.
       - Naming arrays costs one more request to Pure1.
       - A named array for which Pure1 has no hardware data is absent from the
         result and the module gives a warning. With I(type), I(status) or
@@ -51,6 +51,8 @@ options:
         C(power_supply), C(fan), C(eth_port) and C(mgmt_port), among others.
       - A type is matched without regard to case. A type that no component
         has matches nothing and is not an error.
+      - An empty list counts as not set, and the components are not narrowed
+        by type.
     type: list
     elements: str
   status:
@@ -59,7 +61,11 @@ options:
         example C(critical) or C(unused).
       - A status is matched without regard to case. A status that no
         component has matches nothing and is not an error.
-      - Mutually exclusive with I(unhealthy_only).
+      - An empty list counts as not set, and the components are not narrowed
+        by status.
+      - Mutually exclusive with I(unhealthy_only). A task that gives both
+        options fails, also when I(status) is an empty list or
+        I(unhealthy_only) is C(false).
     type: list
     elements: str
   unhealthy_only:
@@ -69,7 +75,9 @@ options:
         C(not_installed), C(unused) or C(identifying). Any other status
         counts as not healthy, also one that Pure1 adds later. A component
         without a status is not counted as unhealthy.
-      - Mutually exclusive with I(status).
+      - Mutually exclusive with I(status). A task that gives both options
+        fails, also when I(status) is an empty list or I(unhealthy_only) is
+        C(false).
     type: bool
     default: false
   connectors:
@@ -80,6 +88,9 @@ options:
       - This costs one more request to Pure1.
     type: bool
     default: false
+seealso:
+  - module: everpure.pure1.pure1_controllers
+  - module: everpure.pure1.pure1_drives
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -115,7 +126,8 @@ EXAMPLES = r"""
 
 - name: Check that every component of the two arrays is healthy
   ansible.builtin.assert:
-    that: faults['pure1_hardware']['unhealthy'] | length == 0
+    that:
+      - faults['pure1_hardware']['unhealthy'] | length == 0
     fail_msg: "{{ faults['pure1_hardware']['unhealthy'] | length }} components need attention"
 
 - name: Collect the power supplies and the fans of all arrays
@@ -179,9 +191,9 @@ pure1_hardware:
           for a component is a dictionary with the keys listed here.
         - Arrays and components are in the order of their names, numbers
           ordered as numbers, so C(CH0.BAY2) comes before C(CH0.BAY10).
-        - Where two arrays carry the same name, the components of the one
-          that Pure1 returns first are in the result and the module gives a
-          warning that counts the components it leaves out.
+        - Where two arrays carry one name, the array that Pure1 returns first
+          keeps the name. The components of the other one are left out, and
+          the module gives a warning that counts them.
         - A key is null when Pure1 reports no value for it.
         - Empty when no component matches.
       type: dict
@@ -233,7 +245,7 @@ pure1_hardware:
         as_of:
           description:
             - Time at which Pure1 last refreshed the data of the component,
-              as C(YYYY-MM-DD HH:MM:SS UTC).
+              in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
           description: The same time in milliseconds since the epoch.
@@ -289,7 +301,7 @@ pure1_hardware:
           type: dict
         as_of:
           description:
-            - Time of the oldest data among those components, as
+            - Time of the oldest data among those components, in UTC, as
               C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
@@ -448,6 +460,7 @@ from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     get_pure1,
     pure1_argument_spec,
     pure1_attr,
+    pure1_is_one_of,
     pure1_list,
     pure1_resolve_arrays,
     pure1_time,
@@ -478,7 +491,7 @@ def warn_if_truncated(module, listing, kind):
         )
 
 
-def file_by_array(module, items, kind, owners):
+def file_by_array(module, items, kind, owners, arrays):
     """Return the items as {array name: {item name: item}}
 
     Pure1 sorts no listing of hardware, most items have no id and two
@@ -491,20 +504,30 @@ def file_by_array(module, items, kind, owners):
     of another array of that name are left out. The listings of one task
     share owners, so that all of them keep the same array. Each of the three
     gives one warning that counts what was left out.
+
+    arrays are the arrays of the task as pure1_resolve_arrays() returned
+    them, None for a task that names none. Pure1 matches the name of an
+    array whatever its case, so the listing of a task that names array1 also
+    holds the items of an array ARRAY1: an item of an array that is none of
+    those of the task was not asked for and is left out without a warning.
     """
     filed = {}
     nameless = 0
     namesakes = 0
     repeated = 0
     for item in items:
-        arrays = pure1_attr(item, "arrays", [])
-        reference = arrays[0] if arrays else None
+        references = pure1_attr(item, "arrays", [])
+        reference = references[0] if references else None
         array = pure1_attr(reference, "name")
         array_id = pure1_attr(reference, "id")
         name = pure1_attr(item, "name")
         if array is None or name is None:
             nameless += 1
-        elif array_id is not None and owners.setdefault(array, array_id) != array_id:
+            continue
+        if arrays is not None and not pure1_is_one_of(arrays, reference):
+            # The array of the item is none of those the task names
+            continue
+        if array_id is not None and owners.setdefault(array, array_id) != array_id:
             # Only two ids that differ show another array
             namesakes += 1
         elif name in filed.setdefault(array, {}):
@@ -611,7 +634,7 @@ def generate_hardware_dict(module, pure_1):
     )
     warn_if_truncated(module, listing, "hardware components")
     owners = {}
-    filed = file_by_array(module, listing.items, "hardware components", owners)
+    filed = file_by_array(module, listing.items, "hardware components", owners, arrays)
 
     connectors = {}
     if params["connectors"] and filed:
@@ -624,7 +647,9 @@ def generate_hardware_dict(module, pure_1):
             ),
         )
         warn_if_truncated(module, listing, "hardware connectors")
-        connectors = file_by_array(module, listing.items, "hardware connectors", owners)
+        connectors = file_by_array(
+            module, listing.items, "hardware connectors", owners, arrays
+        )
 
     hardware = {}
     summary = {}

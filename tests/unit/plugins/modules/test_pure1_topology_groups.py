@@ -208,7 +208,7 @@ def _serve_tree(client, resolved=None, **replaced):
 
 def _in_group(name, source="both", member_id=None):
     return {
-        "id": "id-" + name,
+        "array_id": "id-" + name,
         "member_id": member_id or "id-" + name,
         "status": "joined",
         "status_details": "",
@@ -268,7 +268,7 @@ SITE1 = _expected_group(
     "site1",
     arrays={
         "array4": {
-            "id": "id-array4",
+            "array_id": "id-array4",
             "member_id": None,
             "status": None,
             "status_details": None,
@@ -442,7 +442,7 @@ class TestWholeResult:
                         "children": [],
                         "arrays": {
                             "array1": {
-                                "id": None,
+                                "array_id": None,
                                 "member_id": None,
                                 "status": None,
                                 "status_details": None,
@@ -487,7 +487,9 @@ class TestWholeResult:
         result = _result(module)
         assert result["topology_groups"]["fleet1"]["zone-b"] == dict(
             ZONE_B,
-            arrays={"array9": dict(_in_group("array9", source="members"), id=None)},
+            arrays={
+                "array9": dict(_in_group("array9", source="members"), array_id=None)
+            },
         )
         assert result["topology_groups"]["fleet1"]["region1"] == REGION1
         assert result["arrays"] == WHOLE["arrays"]
@@ -1513,6 +1515,13 @@ class TestArguments:
         pure1_client.get_arrays.assert_not_called()
 
 
+REQUIRED_CALLS_NOTE = (
+    "This module makes the Pure1 REST 1.6 call C(get_fleets) and the Pure1 REST "
+    "1.7 calls C(get_fleets_members), C(get_topology_groups) and "
+    "C(get_topology_groups_members)."
+)
+
+
 def _documented():
     return yaml.safe_load(pure1_topology_groups.RETURN)["pure1_topology_groups"]
 
@@ -1562,12 +1571,12 @@ class TestDocumentation:
                 _array(
                     "array1",
                     "fleet1",
-                    id=arrays["array1"]["id"],
+                    id=arrays["array1"]["array_id"],
                     topology_group=_ref(
                         "site1", "topology-groups", groups["site1"]["id"]
                     ),
                 ),
-                _array("array2", "fleet1", id=arrays["array2"]["id"]),
+                _array("array2", "fleet1", id=arrays["array2"]["array_id"]),
             ],
             fleets=[_fleet("fleet1")],
             groups=[
@@ -1591,13 +1600,28 @@ class TestDocumentation:
 
         assert _result(run_main(pure1_topology_groups)) == sample
 
-    def test_every_required_method_is_in_a_note_with_its_release(self):
+    def test_every_required_method_is_in_the_note_that_names_no_release(self):
+        """The collection requires the py-pure-client that has them all: a
+        note with a release would read as a requirement of its own."""
         notes = yaml.safe_load(pure1_topology_groups.DOCUMENTATION)["notes"]
 
-        for method, minimum in pure1_topology_groups.REQUIRED_METHODS:
+        assert notes[0] == REQUIRED_CALLS_NOTE
+        for method, _minimum in pure1_topology_groups.REQUIRED_METHODS:
             named = [note for note in notes if "C({0})".format(method) in note]
-            assert len(named) == 1, method
-            assert "py-pure-client {0}".format(minimum) in named[0], method
+            assert named == [notes[0]], method
+        assert "py-pure-client" not in " ".join(notes)
+
+    def test_an_array_of_a_group_has_the_keys_of_a_fleet_member(self, pure1_client):
+        """The ID of the array in Pure1 is array_id, as in pure1_fleets."""
+        _serve_tree(pure1_client)
+
+        result = _result(run_main(pure1_topology_groups))
+
+        rack1 = result["topology_groups"]["fleet1"]["rack1"]
+        assert rack1["id"] == "id-fleet1-rack1"
+        assert "id" not in rack1["arrays"]["array1"]
+        assert rack1["arrays"]["array1"]["array_id"] == "id-array1"
+        assert rack1["arrays"]["array1"]["member_id"] == "member-1"
 
     @pytest.mark.parametrize(
         "block, path, says",
@@ -1633,6 +1657,12 @@ class TestDocumentation:
                 "options.fleet",
                 "the result has the name as Pure1 spells it.",
                 id="fleet in another case",
+            ),
+            pytest.param(
+                "DOCUMENTATION",
+                "options.fleet",
+                "It takes one name.",
+                id="one fleet",
             ),
             pytest.param(
                 "DOCUMENTATION",

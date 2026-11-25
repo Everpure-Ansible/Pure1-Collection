@@ -32,7 +32,7 @@ options:
         is not set or empty.
       - A name is matched without regard to case, and the result has the
         name as Pure1 spells it.
-      - The task fails when Pure1 does not know one of the names.
+      - A name that Pure1 does not know fails the task.
       - Every array named here is in the result, with empty lists when Pure1
         reports nothing for it.
       - Pure1 cannot select anomalies by array. The module reads the
@@ -92,12 +92,14 @@ options:
     choices: [open, closed, all]
     default: open
 notes:
-  - This module requires py-pure-client 1.91.0 or later, the first release
-    with the C(get_assessment_security_insights_arrays) and
-    C(get_assessment_security_anomalies) methods of Pure1 REST 1.5.
+  - The Pure1 REST 1.5 calls this module makes,
+    C(get_assessment_security_insights_arrays) and
+    C(get_assessment_security_anomalies), came with py-pure-client 1.91.0.
   - The module makes one request to Pure1 for every 1,000 insights and one
     for every 1,000 anomalies, whatever the number of arrays. I(array) costs
     one more request.
+seealso:
+  - module: everpure.pure1.pure1_cves
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -162,7 +164,7 @@ EXAMPLES = r"""
 
 RETURN = r"""
 pure1_security:
-  description: Returns the security assessment collected from Pure1
+  description: The security assessment collected from Pure1.
   returned: always
   type: dict
   contains:
@@ -171,13 +173,15 @@ pure1_security:
         - The security assessment of each array, as a dictionary keyed by
           array name. The value for an array is a dictionary with the keys
           listed here.
+        - A key is null when Pure1 reports no value for it.
         - Without I(array) an array is present when Pure1 reports an insight
           or an anomaly for it that the options select, and the dictionary is
           empty when it reports none. With I(array) every named array is
           present, with empty lists when nothing is reported for it.
-        - Pure1 can know two arrays by one name. The array that is read first
-          then keeps the name, what Pure1 reports for the other one is left
-          out and the module gives a warning. C(id) tells which array it is.
+        - Where two arrays carry one name, the array that is read first keeps
+          the name. What Pure1 reports for the other one is left out, and the
+          module gives a warning that counts it. C(id) tells which array it
+          is.
       type: dict
       contains:
         id:
@@ -208,7 +212,7 @@ pure1_security:
                   I(insight_types) or a type that Pure1 has added since.
               type: str
             as_of:
-              description: Time Pure1 generated the insight, as C(YYYY-MM-DD HH:MM:SS UTC).
+              description: Time Pure1 generated the insight, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
               type: str
             as_of_epoch:
               description: Time Pure1 generated the insight, in milliseconds since the epoch.
@@ -266,15 +270,15 @@ pure1_security:
               description: What an anomaly of this type is, in the words of Pure1.
               type: str
             start:
-              description: Time the anomaly started, as C(YYYY-MM-DD HH:MM:SS UTC).
+              description: Time the anomaly started, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
               type: str
             start_epoch:
               description: Time the anomaly started, in milliseconds since the epoch.
               type: int
             end:
               description:
-                - Time the anomaly ended, as C(YYYY-MM-DD HH:MM:SS UTC). Pure1
-                  moves it forward while the anomaly goes on.
+                - Time the anomaly ended, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
+                  Pure1 moves it forward while the anomaly goes on.
               type: str
             end_epoch:
               description: Time the anomaly ended, in milliseconds since the epoch.

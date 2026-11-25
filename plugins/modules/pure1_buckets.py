@@ -14,12 +14,12 @@ module: pure1_buckets
 version_added: '1.6.0'
 short_description: Collect object store accounts and their buckets from Pure1
 description:
-  - Returns the object store accounts of the FlashBlade and FlashArray arrays
+  - Collect the object store accounts of the FlashBlade and FlashArray arrays
     that Pure1 knows, each with its buckets, their versioning state, their
     number of objects and whether a bucket is destroyed and not yet
     eradicated.
-  - Use it for an inventory of the object storage of a fleet, to check
-    buckets across arrays, and to get the ids by which Pure1 keys the
+  - Use it for an inventory of the object storage of the organization, to
+    check buckets across arrays, and to get the IDs by which Pure1 keys the
     metrics of buckets and accounts.
   - Pure1 holds what an array reported last, which is usually less than an
     hour old. The C(as_of) of each account and bucket gives the time of its
@@ -62,6 +62,8 @@ options:
       - When it is set, an account without such a bucket is left out of the
         result.
     type: bool
+seealso:
+  - module: everpure.pure1.pure1_metrics
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -142,16 +144,19 @@ pure1_buckets:
         - Where Pure1 reports two accounts of one name on an array, or two
           buckets of one name in an account, the one created last is returned
           and the module gives a warning.
+        - Where two arrays carry one name, the array that Pure1 returns
+          first keeps the name. The accounts and buckets of the other one
+          are left out, and the module gives a warning that counts them.
         - Empty when there is nothing to return.
       type: dict
       contains:
         id:
           description:
-            - The id of the account in Pure1, which the metrics of the
+            - The ID of the account in Pure1, which the metrics of the
               account are keyed by.
           type: str
         created:
-          description: The time the account was created, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: The time the account was created, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         created_epoch:
           description: The time the account was created, in milliseconds since the epoch.
@@ -164,7 +169,7 @@ pure1_buckets:
           type: int
         as_of:
           description:
-            - The time of the data that Pure1 holds of the account, as
+            - The time of the data that Pure1 holds of the account, in UTC, as
               C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
@@ -182,11 +187,11 @@ pure1_buckets:
           contains:
             id:
               description:
-                - The id of the bucket in Pure1, which the metrics of the
+                - The ID of the bucket in Pure1, which the metrics of the
                   bucket are keyed by.
               type: str
             created:
-              description: The time the bucket was created, as C(YYYY-MM-DD HH:MM:SS UTC).
+              description: The time the bucket was created, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
               type: str
             created_epoch:
               description: The time the bucket was created, in milliseconds since the epoch.
@@ -205,8 +210,8 @@ pure1_buckets:
               type: str
             as_of:
               description:
-                - The time of the data that Pure1 holds of the bucket, as
-                  C(YYYY-MM-DD HH:MM:SS UTC).
+                - The time of the data that Pure1 holds of the bucket, in UTC,
+                  as C(YYYY-MM-DD HH:MM:SS UTC).
               type: str
             as_of_epoch:
               description:
@@ -243,6 +248,8 @@ from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     get_pure1,
     pure1_argument_spec,
     pure1_attr,
+    pure1_is_one_of,
+    pure1_keeps_name,
     pure1_list,
     pure1_resolve_arrays,
     pure1_time,
@@ -259,14 +266,35 @@ def warn_if_truncated(module, listing, kind):
         )
 
 
-def array_names(item):
-    """Return the names of the arrays an account or a bucket is on, each once"""
+def array_names(item, arrays, owners):
+    """Return the names of the arrays to file an account or a bucket under, each once
+
+    arrays are the arrays of the task as pure1_resolve_arrays() returns
+    them, or None. Pure1 matches the name of an array without regard to
+    case, and an item can be on more arrays than the task names: an array
+    that is not one of them is passed over. Of two arrays that carry one
+    name the one seen first keeps it, which owners tells. The second value
+    is whether the item is on an array that does not keep its name. The
+    names are None for an item that names no array at all.
+    """
+    references = [
+        reference
+        for reference in pure1_attr(item, "arrays", [])
+        if pure1_attr(reference, "name") is not None
+    ]
+    if not references:
+        return None, False
     names = []
-    for array in pure1_attr(item, "arrays", []):
-        name = pure1_attr(array, "name")
-        if name is not None and name not in names:
+    other_array = False
+    for reference in references:
+        name = pure1_attr(reference, "name")
+        if arrays is not None and not pure1_is_one_of(arrays, reference):
+            continue
+        if not pure1_keeps_name(owners, name, pure1_attr(reference, "id")):
+            other_array = True
+        elif name not in names:
             names.append(name)
-    return names
+    return names, other_array
 
 
 def is_another(earlier, row):
@@ -348,19 +376,23 @@ def generate_accounts_dict(module, pure_1):
 
     accounts_info = {}
     by_id = {}
+    # The accounts and the buckets of an array go under one name
+    owners = {}
     left_out = 0
+    other_array = 0
     same_name = 0
     for item in accounts:
         name = pure1_attr(item, "name")
-        on_arrays = array_names(item)
-        if name is None or not on_arrays:
+        if name is None:
             left_out += 1
             continue
+        on_arrays, on_other_array = array_names(item, arrays, owners)
+        if on_arrays is None:
+            left_out += 1
+            continue
+        if on_other_array:
+            other_array += 1
         for array in on_arrays:
-            # Pure1 matches the name of an array whatever its case, and an
-            # account or a bucket can be on more arrays than the task names
-            if wanted is not None and array not in wanted:
-                continue
             row = account_row(item)
             if row["id"] is not None:
                 # Also when another account takes its place in the result:
@@ -375,29 +407,39 @@ def generate_accounts_dict(module, pure_1):
     if left_out:
         module.warn(
             "Object store accounts that Pure1 returned without a name or "
-            "without an array are left out of the result: {0}".format(left_out)
+            "without an array are left out of the result: {0}.".format(left_out)
+        )
+    if other_array:
+        module.warn(
+            "Object store accounts of an array that has the name of another "
+            "array are left out of the result: {0}.".format(other_array)
         )
     if same_name:
         module.warn(
-            "Pure1 returned {0} object store accounts under the name of another "
-            "account of the same array: of each such name only the account "
-            "created last is in the result, with its buckets.".format(same_name)
+            "Object store accounts that Pure1 returned under the name of "
+            "another account of the same array are left out of the result, "
+            "which keeps the account created last with its buckets: "
+            "{0}.".format(same_name)
         )
 
     left_out = 0
+    other_array = 0
     same_name = 0
     for item in buckets:
         name = pure1_attr(item, "name")
         account_id = pure1_attr(item, "account.id")
         account_name = pure1_attr(item, "account.name")
-        on_arrays = array_names(item)
-        if name is None or not on_arrays:
+        if name is None:
             left_out += 1
             continue
+        on_arrays, on_other_array = array_names(item, arrays, owners)
+        if on_arrays is None:
+            left_out += 1
+            continue
+        if on_other_array:
+            other_array += 1
         without_account = False
         for array in on_arrays:
-            if wanted is not None and array not in wanted:
-                continue
             # The id tells the account, whatever name the bucket has for it
             row = by_id.get((array, account_id))
             if row is None and account_name is not None:
@@ -419,13 +461,18 @@ def generate_accounts_dict(module, pure_1):
     if left_out:
         module.warn(
             "Buckets that Pure1 returned without a name, without an account or "
-            "without an array are left out of the result: {0}".format(left_out)
+            "without an array are left out of the result: {0}.".format(left_out)
+        )
+    if other_array:
+        module.warn(
+            "Buckets of an array that has the name of another array are left "
+            "out of the result: {0}.".format(other_array)
         )
     if same_name:
         module.warn(
-            "Pure1 returned {0} buckets under the name of another bucket of the "
-            "same account: of each such name only the bucket created last is in "
-            "the result.".format(same_name)
+            "Buckets that Pure1 returned under the name of another bucket of "
+            "the same account are left out of the result, which keeps the "
+            "bucket created last: {0}.".format(same_name)
         )
 
     if selected:

@@ -25,6 +25,8 @@ from plugins.module_utils.fleets import (
     ARRAY_TYPES,
     pure1_array_record,
     pure1_fleet_map,
+    pure1_list_arrays,
+    pure1_resolve_fleets,
     pure1_tag_map,
 )
 from tests.unit.conftest import (
@@ -1973,6 +1975,276 @@ class TestRequests:
         )
         module.warn.assert_not_called()
         pure1_client.get_topology_groups.assert_not_called()
+
+
+ARRAYS_LEFT_OUT = (
+    "Arrays that Pure1 returned without a name or with the name of "
+    "another array are left out of the result: {0}."
+)
+
+
+class TestListArrays:
+    """pure1_list_arrays files every array by its name; the module makes the call."""
+
+    def test_arrays_are_filed_by_name_in_the_order_of_pure1(self, pure1_client):
+        module = ansible_module()
+        arrays = [_array("array2"), _array("array1"), _array("Array1")]
+        answers = paged_answers("ArrayGetResponse", arrays, page_size=2)
+        pure1_client.get_arrays.side_effect = answers
+
+        def all_arrays(**page):
+            return pure1_client.get_arrays(**page)
+
+        by_name = pure1_list_arrays(module, all_arrays)
+
+        assert list(by_name) == ["array2", "array1", "Array1"]
+        assert list(by_name.values()) == arrays
+        # the call of the module, and the page of the token that the SDK follows
+        assert answers.requests == [{}, {"continuation_token": "page-2"}]
+        pure1_client.get_arrays.assert_called_once_with()
+        module.warn.assert_not_called()
+        module.fail_json.assert_not_called()
+
+    def test_no_arrays(self, pure1_client):
+        module = ansible_module()
+
+        def all_arrays(**page):
+            return pure1_client.get_arrays(**page)
+
+        assert pure1_list_arrays(module, all_arrays) == {}
+        module.warn.assert_not_called()
+
+    def test_arrays_that_cannot_be_filed_are_left_out(self, pure1_client):
+        module = ansible_module()
+        arrays = [
+            sdk_model("Array", id="id-nameless"),
+            _array("array1"),
+            _array("array1", id="id-second"),
+            _array("array2"),
+        ]
+        pure1_client.get_arrays.return_value = valid_response(arrays)
+
+        def all_arrays(**page):
+            return pure1_client.get_arrays(**page)
+
+        by_name = pure1_list_arrays(module, all_arrays)
+
+        # The first array of a name is the one that is filed
+        assert by_name == {"array1": arrays[1], "array2": arrays[3]}
+        assert by_name["array1"].id == "id-array1"
+        assert _warnings(module) == [ARRAYS_LEFT_OUT.format(2)]
+
+    def test_listing_that_comes_short_gives_its_warning_first(self, pure1_client):
+        module = ansible_module()
+        arrays = [
+            sdk_model("Array", id="id-nameless"),
+            _array("array1"),
+            _array("array1", id="id-second"),
+        ]
+        answers = paged_answers("ArrayGetResponse", arrays, total_item_count=5)
+        pure1_client.get_arrays.side_effect = answers
+
+        def all_arrays(**page):
+            return pure1_client.get_arrays(**page)
+
+        by_name = pure1_list_arrays(module, all_arrays)
+
+        assert list(by_name) == ["array1"]
+        # pure1_list asks once more, for what would follow the three arrays
+        assert answers.requests == [{}, {"offset": 3}]
+        assert _warnings(module) == [
+            "Pure1 returned 3 of 5 arrays: the result may be incomplete.",
+            ARRAYS_LEFT_OUT.format(2),
+        ]
+
+    def test_values_are_the_arrays_that_the_fleet_map_takes(self, pure1_client):
+        module = ansible_module()
+        _serve_lab(pure1_client)
+
+        def all_arrays(**page):
+            return pure1_client.get_arrays(**page)
+
+        arrays = pure1_list_arrays(module, all_arrays)
+        result = pure1_fleet_map(module, pure1_client, arrays=list(arrays.values()))
+
+        assert result == LAB_MAP
+        pure1_client.get_arrays.assert_called_once_with()
+        module.warn.assert_not_called()
+
+    def test_fleet_map_lists_the_arrays_with_it(self, pure1_client, monkeypatch):
+        """The arrays that the map lists itself are those of this function."""
+        module = ansible_module()
+        _serve_lab(pure1_client)
+        calls = []
+
+        def listed(*args):
+            calls.append(args[0])
+            return pure1_list_arrays(*args)
+
+        monkeypatch.setattr(fleets_utils, "pure1_list_arrays", listed)
+
+        assert pure1_fleet_map(module, pure1_client) == LAB_MAP
+        assert calls == [module]
+        pure1_client.get_arrays.assert_called_once_with()
+
+    @pytest.mark.parametrize("attribute, answer, expected", FAILURES)
+    def test_failed_request_fails_the_task_with_one_line(
+        self, pure1_client, attribute, answer, expected
+    ):
+        module = ansible_module()
+        pure1_client.get_arrays.return_value = None
+        setattr(pure1_client.get_arrays, attribute, answer)
+
+        def all_arrays(**page):
+            return pure1_client.get_arrays(**page)
+
+        with pytest.raises(SystemExit):
+            pure1_list_arrays(module, all_arrays)
+
+        module.fail_json.assert_called_once_with(msg=expected.format("get_arrays"))
+        module.warn.assert_not_called()
+
+    def test_request_that_takes_no_paging_keyword_is_refused(self, pure1_client):
+        """As pure1_list refuses it: it would work until a second page is needed."""
+
+        def all_arrays():
+            return pure1_client.get_arrays()
+
+        with pytest.raises(TypeError, match="must take the paging keywords"):
+            pure1_list_arrays(ansible_module(), all_arrays)
+
+        pure1_client.get_arrays.assert_not_called()
+
+
+AMBIGUOUS = (
+    "Pure1 knows more than one fleet whose name is {0} in another case: {1}. "
+    "Give the name as Pure1 spells it."
+)
+
+
+class TestResolveFleets:
+    """pure1_resolve_fleets finds the fleets of the names a task gives."""
+
+    @pytest.mark.parametrize("names", [None, []])
+    def test_no_names_is_no_selection(self, names):
+        module = ansible_module()
+
+        assert pure1_resolve_fleets(module, ["fleet1"], names) is None
+        module.fail_json.assert_not_called()
+
+    def test_names_come_back_as_pure1_spells_them_in_the_order_of_the_task(self):
+        module = ansible_module()
+        fleets = ["Fleet1", "fleet2", "fleet3"]
+
+        found = pure1_resolve_fleets(module, fleets, ["FLEET3", "fleet1"])
+
+        assert found == ["fleet3", "Fleet1"]
+        module.fail_json.assert_not_called()
+        module.warn.assert_not_called()
+
+    def test_one_name_of_an_option_that_takes_one(self):
+        """An option of type str gives its name in a list and takes the first."""
+        fleets = ["fleet1", "fleet2"]
+
+        assert pure1_resolve_fleets(ansible_module(), fleets, ["FLEET2"])[0] == "fleet2"
+
+    def test_fleets_can_be_those_of_the_fleet_map(self, pure1_client):
+        module = ansible_module()
+        _serve_lab(pure1_client)
+        fleets = pure1_fleet_map(module, pure1_client)["fleets"]
+
+        assert pure1_resolve_fleets(module, fleets, ["FLEET2", "Fleet1"]) == [
+            "fleet2",
+            "fleet1",
+        ]
+
+    def test_fleet_named_twice_comes_once(self):
+        fleets = ["fleet1", "fleet2"]
+        names = ["fleet1", "FLEET1", "fleet2", "fleet1"]
+
+        assert pure1_resolve_fleets(ansible_module(), fleets, names) == fleets
+
+    def test_spelling_of_the_task_wins_over_another_case(self):
+        module = ansible_module()
+        fleets = ["FLEET1", "Fleet1", "fleet1"]
+
+        assert pure1_resolve_fleets(module, fleets, ["Fleet1"]) == ["Fleet1"]
+        module.fail_json.assert_not_called()
+
+    def test_name_in_two_other_cases_fails_the_task(self):
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_fleets(module, ["fleet1", "other", "Fleet1"], ["FLEET1"])
+
+        module.fail_json.assert_called_once_with(
+            msg=AMBIGUOUS.format("FLEET1", "Fleet1, fleet1")
+        )
+
+    def test_name_in_two_other_cases_fails_before_an_unknown_name(self):
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_fleets(module, ["fleet1", "Fleet1"], ["nope", "FLEET1"])
+
+        module.fail_json.assert_called_once_with(
+            msg=AMBIGUOUS.format("FLEET1", "Fleet1, fleet1")
+        )
+
+    @pytest.mark.parametrize(
+        "names, expected",
+        [
+            pytest.param(["foo"], "Fleet foo is not known to Pure1.", id="the only"),
+            pytest.param(
+                ["fleet1", "Foo"], "Fleet Foo is not known to Pure1.", id="one of two"
+            ),
+            pytest.param(
+                ["foo", "fleet1", "Bar"],
+                "Fleets foo, Bar are not known to Pure1.",
+                id="two of three",
+            ),
+            pytest.param(
+                ["foo", "foo"], "Fleet foo is not known to Pure1.", id="given twice"
+            ),
+        ],
+    )
+    def test_unknown_name_fails_the_task(self, names, expected):
+        """The names are as the task wrote them."""
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_fleets(module, ["fleet1", "fleet2"], names)
+
+        module.fail_json.assert_called_once_with(msg=expected)
+
+    def test_no_fleet_is_known(self):
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_fleets(module, [], ["fleet1"])
+
+        module.fail_json.assert_called_once_with(
+            msg="Fleet fleet1 is not known to Pure1."
+        )
+
+    @pytest.mark.parametrize(
+        "names",
+        [
+            pytest.param([""], id="the only"),
+            pytest.param(["fleet1", ""], id="one of two"),
+            pytest.param(["  "], id="blank"),
+            pytest.param(["nope", ""], id="after an unknown name"),
+        ],
+    )
+    def test_empty_name_fails_the_task(self, names):
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            pure1_resolve_fleets(module, ["fleet1", ""], names)
+
+        module.fail_json.assert_called_once_with(
+            msg="The name of a fleet must not be empty."
+        )
 
 
 def _tag(array, tag_key, value="v", namespace="pure1", **overrides):

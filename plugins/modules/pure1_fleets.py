@@ -26,15 +26,15 @@ description:
     row, and an array without a member row as a member of the fleet that its
     own record names. C(source) of a member tells which of the two places it
     comes from, and C(mismatches) lists the arrays for which they differ.
-  - Pure1 refreshes the member rows as a periodic snapshot, about once an
-    hour, so the status of a member can be about an hour old. C(as_of) of a
-    member is the time of that snapshot. C(as_of) of the fleet is the time of
-    the data of the fleet itself and says nothing about its members.
+  - The member rows are a periodic snapshot, so the status of a member can be
+    about an hour old. C(as_of) of a member is the time of that snapshot.
+    C(as_of) of the fleet is the time of the data of the fleet itself and
+    says nothing about its members.
 options:
   name:
     description:
       - Report only the fleets with these names.
-      - An empty list selects nothing, and every fleet is reported.
+      - An empty list counts as not set, and every fleet is reported.
       - A name is matched without regard to case, and the result carries the
         name as Pure1 spells it.
       - The task fails when Pure1 does not know a fleet of one of the names.
@@ -47,27 +47,28 @@ options:
       - Report only the fleets that these arrays are members of, with
         C(members) narrowed to these arrays. C(member_count) and
         C(coordinators) still describe the whole fleet.
-      - An empty list selects nothing, and every fleet is reported with all
+      - An empty list counts as not set, and every fleet is reported with all
         its members.
       - A name is matched without regard to case, and the result carries the
         name as Pure1 spells it.
-      - The task fails when Pure1 does not know an array of one of the names.
-        An array that is in no fleet is not an error, and when none of the
-        arrays is in a fleet C(fleets) is empty.
+      - A name that Pure1 does not know fails the task. An array that is in
+        no fleet is not an error, and when none of the arrays is in a fleet
+        C(fleets) is empty.
       - Mutually exclusive with I(name). A task that gives both options
         fails, also when one of them is an empty list.
     type: list
     elements: str
 notes:
-  - This module requires py-pure-client 1.99.0 or later, the first release
-    with the C(get_fleets_members), C(get_topology_groups) and
-    C(get_topology_groups_members) methods of Pure1 REST 1.7. It also uses
-    C(get_fleets) of Pure1 REST 1.6, which py-pure-client 1.93.0 and later
-    have.
+  - This module makes the Pure1 REST 1.6 call C(get_fleets) and the Pure1
+    REST 1.7 calls C(get_fleets_members), C(get_topology_groups) and
+    C(get_topology_groups_members).
   - The module reads five listings whatever the options select, the arrays,
     the fleets, the fleet members, the topology groups and their members,
     each with one request for every 1,000 objects. I(array) costs one more
     request.
+seealso:
+  - module: everpure.pure1.pure1_arrays
+  - module: everpure.pure1.pure1_topology_groups
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -121,7 +122,7 @@ EXAMPLES = r"""
 
 RETURN = r"""
 pure1_fleets:
-  description: The fleets that Pure1 knows, with their members
+  description: The fleets that Pure1 knows, with their members.
   returned: always
   type: dict
   contains:
@@ -202,8 +203,8 @@ pure1_fleets:
             as_of:
               description:
                 - The time of the member row, in UTC, as
-                  C(YYYY-MM-DD HH:MM:SS UTC). Pure1 refreshes the member rows
-                  about once an hour, so this is how current C(status) is.
+                  C(YYYY-MM-DD HH:MM:SS UTC). The member rows can be about an
+                  hour old, and this is how current C(status) is.
                 - Null for a member that has no member row.
               type: str
             as_of_epoch:
@@ -332,12 +333,13 @@ pure1_fleets:
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.everpure.pure1.plugins.module_utils.fleets import (
     pure1_fleet_map,
+    pure1_list_arrays,
+    pure1_resolve_fleets,
 )
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     get_pure1,
     pure1_argument_spec,
     pure1_attr,
-    pure1_list,
     pure1_require,
     pure1_resolve_arrays,
 )
@@ -353,79 +355,14 @@ REQUIRED_METHODS = (
 )
 
 
-def list_arrays(module, pure_1):
-    """Return every array of Pure1 by its name, as the SDK models
-
-    An array without a name, and one with the name of an array before it,
-    cannot be filed and is counted in one warning.
-    """
+def generate_fleets_dict(module, pure_1):
+    """Return the fleets with their members and the arrays whose sources differ"""
+    selected = pure1_resolve_arrays(module, pure_1, module.params["array"])
 
     def all_arrays(**page):
         return pure_1.get_arrays(**page)
 
-    listing = pure1_list(module, "get_arrays", all_arrays)
-    if listing.truncated:
-        module.warn(
-            "Pure1 returned {0} of {1} arrays: the result may be incomplete.".format(
-                len(listing.items),
-                "an unknown number of" if listing.total is None else listing.total,
-            )
-        )
-    arrays = {}
-    left_out = 0
-    for array in listing.items:
-        name = pure1_attr(array, "name")
-        if name is None or name in arrays:
-            left_out += 1
-        else:
-            arrays[name] = array
-    if left_out:
-        module.warn(
-            "Arrays that Pure1 returned without a name or with the name of "
-            "another array are left out of the result: {0}.".format(left_out)
-        )
-    return arrays
-
-
-def select_fleets(module, fleets, names):
-    """Return the names of the fleets a task names, as Pure1 spells them
-
-    fleets are the names of the fleets Pure1 knows. A name is matched
-    without regard to case, as Pure1 itself compares the names of fleets, and
-    the spelling of the task wins over the same name in another case. A name
-    that matches no fleet fails the task, and so does an empty one.
-    """
-    if not all(name.strip() for name in names):
-        module.fail_json(msg="The name of a fleet must not be empty.")
-    known = {}
-    for fleet in fleets:
-        known.setdefault(fleet.lower(), []).append(fleet)
-    found = []
-    unknown = []
-    for name in names:
-        matches = known.get(name.lower(), [])
-        if name in matches:
-            matches = [name]
-        if len(matches) > 1:
-            module.fail_json(
-                msg="Pure1 knows more than one fleet whose name is {0} in another "
-                "case: {1}. Give the name as Pure1 spells it.".format(
-                    name, ", ".join(sorted(matches))
-                )
-            )
-        if not matches and name not in unknown:
-            unknown.append(name)
-        found.extend(matches)
-    if unknown:
-        text = "Fleet {0} is" if len(unknown) == 1 else "Fleets {0} are"
-        module.fail_json(msg=(text + " not known to Pure1.").format(", ".join(unknown)))
-    return found
-
-
-def generate_fleets_dict(module, pure_1):
-    """Return the fleets with their members and the arrays whose sources differ"""
-    selected = pure1_resolve_arrays(module, pure_1, module.params["array"])
-    arrays = list_arrays(module, pure_1)
+    arrays = pure1_list_arrays(module, all_arrays)
     # The one rule of the collection for the fleet and the group of an array
     fleet_map = pure1_fleet_map(module, pure_1, arrays=list(arrays.values()))
     fleets = fleet_map["fleets"]
@@ -434,7 +371,7 @@ def generate_fleets_dict(module, pure_1):
     # None: every member of a reported fleet
     members_wanted = None
     if module.params["name"]:
-        reported = select_fleets(module, reported, module.params["name"])
+        reported = pure1_resolve_fleets(module, reported, module.params["name"])
         # The members of the fleets, and the arrays whose record names one
         concerned = {
             array

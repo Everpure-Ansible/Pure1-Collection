@@ -87,13 +87,18 @@ RST_DIRECTIVE = r".. \w+?::"
 DIRECTORIES_EXAMPLE = "Show the paths of the managed directories of each file system"
 
 NOT_FILED = (
-    "Pure1 returned {0} file systems without a name or without an array: they "
-    "are left out of the result."
+    "File systems that Pure1 returned without a name or without an array are "
+    "left out of the result: {0}."
 )
 NO_FILE_SYSTEM = (
-    "Pure1 returned {0} managed directories whose file system it did not "
-    "return: they are left out of the result."
+    "Managed directories whose file system Pure1 did not return are left out "
+    "of the result: {0}."
 )
+OTHER_ARRAY = (
+    "File systems of an array that has the name of another array are left out "
+    "of the result: {0}."
+)
+MODULE = "everpure.pure1.pure1_file_systems"
 
 
 def _blade_file_system(array="array1", **overrides):
@@ -158,6 +163,22 @@ def _run(pure1_client, listed, managed=None, arrays=None, **params):
             valid_response([sdk_model("Array", name=name) for name in arrays]),
         ]
     return run_main(pure1_file_systems, **params)
+
+
+def _on(name, array_id):
+    """A reference to an array as Pure1 sends it, with the ID of the array"""
+    return sdk_model("FixedReferenceFqdn", id=array_id, name=name)
+
+
+def _known_arrays(pure1_client, *arrays):
+    """Answer the request that resolves the arrays of a task, after the check
+    of get_pure1, with arrays of these names and IDs"""
+    pure1_client.get_arrays.side_effect = [
+        valid_response(),
+        valid_response(
+            [sdk_model("Array", id=array_id, name=name) for name, array_id in arrays]
+        ),
+    ]
 
 
 def _file_systems(module):
@@ -748,7 +769,7 @@ class TestFiling:
     def test_file_system_on_an_array_the_task_did_not_name_is_left_out(
         self, pure1_client
     ):
-        """Pure1 filters by array, so this is an answer it should not give"""
+        """It is not of the task, and is not counted as one that cannot be filed"""
         module = _run(
             pure1_client,
             [_blade_file_system("array1"), _array_file_system("array2")],
@@ -757,7 +778,99 @@ class TestFiling:
         )
 
         assert _file_systems(module) == {"array1": {"fs1": BLADE_ROW}}
-        assert _warnings(module) == [NOT_FILED.format(1)]
+        module.warn.assert_not_called()
+
+    @pytest.mark.parametrize("directories", [False, True])
+    def test_array_named_in_another_case_is_not_of_the_task(
+        self, pure1_client, directories
+    ):
+        """Pure1 matches the name of an array without regard to case, so a
+        task that names array1 is also answered with what is on ARRAY1"""
+        _known_arrays(pure1_client, ("array1", "array-id-1"), ("ARRAY1", "array-id-2"))
+
+        module = _run(
+            pure1_client,
+            [
+                _array_file_system(arrays=[_on("array1", "array-id-1")]),
+                _array_file_system(id="fs-id-3", arrays=[_on("ARRAY1", "array-id-2")]),
+            ],
+            managed=(
+                [_directory(), _directory("fs-id-3", id="dir-id-3")]
+                if directories
+                else None
+            ),
+            array=["array1"],
+        )
+
+        row = (
+            dict(ARRAY_ROW, directories=[ROOT_DIRECTORY]) if directories else ARRAY_ROW
+        )
+        assert _file_systems(module) == {"array1": {"pod1::fs2": row}}
+        module.warn.assert_not_called()
+        pure1_client.get_file_systems.assert_called_once_with(
+            filter="arrays.name='array1'"
+        )
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({}, id="every array"),
+            pytest.param({"array": ["array1"]}, id="array"),
+        ],
+    )
+    def test_two_arrays_of_one_name_are_not_merged(self, pure1_client, params):
+        """The array that Pure1 returns first keeps the name
+
+        A file system of the other array is neither a file system of the
+        first nor in the same_name of one, and its directory is not counted
+        as one without a file system.
+        """
+        first = ("array1", "array-id-1")
+        second = ("array1", "array-id-2")
+        _known_arrays(pure1_client, first, second)
+
+        module = _run(
+            pure1_client,
+            [
+                _blade_file_system(arrays=[_on(*first)]),
+                _blade_file_system(id="fs-id-3", arrays=[_on(*second)]),
+                _array_file_system(arrays=[_on(*second)]),
+                _array_file_system(id="fs-id-4", name="fs4", arrays=[_on(*first)]),
+                # on both arrays: filed under the first and counted once
+                _array_file_system(
+                    id="fs-id-5", name="fs5", arrays=[_on(*second), _on(*first)]
+                ),
+            ],
+            managed=[_directory()],
+            **params
+        )
+
+        assert _file_systems(module) == {
+            "array1": {
+                "fs1": dict(BLADE_ROW, directories=[]),
+                "fs4": dict(ARRAY_ROW, id="fs-id-4", directories=[]),
+                "fs5": dict(ARRAY_ROW, id="fs-id-5", directories=[]),
+            }
+        }
+        assert _warnings(module) == [OTHER_ARRAY.format(3)]
+
+    def test_array_without_an_id_is_taken_for_the_array_of_its_name(self, pure1_client):
+        """Arrays are told apart by their IDs alone"""
+        module = _run(
+            pure1_client,
+            [
+                _blade_file_system("array1"),
+                _array_file_system(arrays=[_on("array1", "array-id-1")]),
+                _array_file_system(
+                    id="fs-id-3", name="fs3", arrays=[_on("array1", "array-id-2")]
+                ),
+            ],
+        )
+
+        assert _file_systems(module) == {
+            "array1": {"fs1": BLADE_ROW, "pod1::fs2": ARRAY_ROW}
+        }
+        assert _warnings(module) == [OTHER_ARRAY.format(1)]
 
     @pytest.mark.parametrize("first", ["older", "newer"])
     @pytest.mark.parametrize(
@@ -1221,3 +1334,134 @@ class TestListings:
             msg="Pure1 request get_arrays failed (HTTP 400): Illegal filter format"
         )
         pure1_client.get_file_systems.assert_not_called()
+
+
+def _template(text, variables):
+    """Return what ansible-core makes of a template of a task"""
+    return Templar(loader=None, variables=variables).template(trust_as_template(text))
+
+
+def _play_examples(pure1_client, **listed):
+    """Run the tasks of EXAMPLES in their order and return what the others make
+
+    A task of the module runs through main() with the options of the example
+    and registers its result. listed gives, by the name the task registers,
+    the file systems Pure1 has for it, and a task with directories gets the
+    one directory of _directory(). Every other task is returned under the
+    name that the task of the module before it registered, as a list with
+    one entry for each item of its loop, one without a loop: the templates
+    of its arguments, as ansible-core evaluates them.
+    """
+    registered = {}
+    made = {}
+    reads = None
+    for task in yaml.safe_load(pure1_file_systems.EXAMPLES):
+        options = task.get(MODULE)
+        if options is not None:
+            options = {
+                name: value
+                for name, value in options.items()
+                if name not in ("app_id", "key_file")
+            }
+            reads = task["register"]
+            module = _run(
+                pure1_client,
+                listed[reads],
+                managed=[_directory()] if options.get("directories") else None,
+                # also for a task without array: the answers of the task
+                # before it are used up
+                arrays=options.get("array", []),
+                **options
+            )
+            registered[reads] = dict(module.exit_json.call_args[1])
+            made[reads] = []
+            continue
+        (action,) = set(task) - {"name", "when", "loop"}
+        items = _template(task["loop"], registered) if "loop" in task else [None]
+        entries = []
+        for item in items:
+            scope = dict(registered, item=item)
+            entry = {}
+            if "when" in task:
+                entry["when"] = _template("{{ " + task["when"] + " }}", scope)
+            for key, value in task[action].items():
+                if key == "that":
+                    entry[key] = [
+                        _template("{{ " + each + " }}", scope) for each in value
+                    ]
+                else:
+                    entry[key] = _template(value, scope)
+            entries.append(entry)
+        made[reads].append(entries)
+    return made
+
+
+class TestExamples:
+    """The tasks of EXAMPLES, on what the module returns."""
+
+    def test_examples_read_what_the_module_returns(self, pure1_client):
+        exported = sdk_model("Nfs", enabled=True, rules="*(ro)")
+        made = _play_examples(
+            pure1_client,
+            all_file_systems=[
+                # rules without NFS, NFS without rules, and both
+                _blade_file_system(),
+                _blade_file_system(
+                    id="fs-id-3",
+                    name="fs3",
+                    nfs=sdk_model("Nfs", enabled=True, rules=""),
+                ),
+                _blade_file_system(id="fs-id-4", name="fs4", nfs=exported),
+                _array_file_system(),
+            ],
+            with_directories=[_array_file_system("array1")],
+            named_file_systems=[_blade_file_system(), _array_file_system()],
+            destroyed_file_systems=[],
+        )
+
+        assert made == {
+            "all_file_systems": [
+                [
+                    {"msg": "array1 has ['fs1', 'fs3', 'fs4']"},
+                    {"msg": "array2 has ['pod1::fs2']"},
+                ],
+                [{"msg": ["fs4"]}],
+            ],
+            "with_directories": [[{"msg": "pod1::fs2 has ['/']"}]],
+            "named_file_systems": [[{"msg": ["array1", "array2"]}]],
+            "destroyed_file_systems": [[{"that": [True]}]],
+        }
+
+    def test_examples_on_arrays_without_what_they_name(self, pure1_client):
+        """Nothing is exported, array1 has no file system and none has the names"""
+        made = _play_examples(
+            pure1_client,
+            all_file_systems=[_blade_file_system("array2"), _array_file_system()],
+            with_directories=[],
+            named_file_systems=[],
+            destroyed_file_systems=[],
+        )
+
+        assert made == {
+            "all_file_systems": [
+                [{"msg": "array2 has ['fs1', 'pod1::fs2']"}],
+                [{"msg": []}],
+            ],
+            "with_directories": [[]],
+            "named_file_systems": [[{"msg": []}]],
+            "destroyed_file_systems": [[{"that": [True]}]],
+        }
+
+    def test_check_of_the_examples_fails_on_a_destroyed_file_system(self, pure1_client):
+        made = _play_examples(
+            pure1_client,
+            all_file_systems=[],
+            with_directories=[],
+            named_file_systems=[],
+            destroyed_file_systems=[_array_file_system("array1")],
+        )
+
+        assert made["destroyed_file_systems"] == [[{"that": [False]}]]
+        pure1_client.get_file_systems.assert_called_with(
+            filter="arrays.name='array1' and destroyed=true"
+        )

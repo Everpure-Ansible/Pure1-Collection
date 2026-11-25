@@ -111,6 +111,30 @@ REFERENCE_ONLY = dict(
     created=None, created_epoch=None, object_count=None, as_of=None, as_of_epoch=None
 )
 
+SAME_ACCOUNT_NAME = (
+    "Object store accounts that Pure1 returned under the name of another "
+    "account of the same array are left out of the result, which keeps the "
+    "account created last with its buckets: {0}."
+)
+SAME_BUCKET_NAME = (
+    "Buckets that Pure1 returned under the name of another bucket of the same "
+    "account are left out of the result, which keeps the bucket created last: "
+    "{0}."
+)
+OTHER_ARRAY_ACCOUNTS = (
+    "Object store accounts of an array that has the name of another array are "
+    "left out of the result: {0}."
+)
+OTHER_ARRAY_BUCKETS = (
+    "Buckets of an array that has the name of another array are left out of "
+    "the result: {0}."
+)
+
+
+def _on(name, array_id):
+    """A reference to an array as Pure1 sends it, with the ID of the array"""
+    return sdk_model("FixedReferenceFqdn", id=array_id, name=name)
+
 
 def _params(**params):
     """The options as the argument spec leaves them when the task sets none"""
@@ -696,7 +720,7 @@ class TestGenerateAccountsDict:
         }
         module.warn.assert_called_once_with(
             "Buckets that Pure1 returned without a name, without an account or "
-            "without an array are left out of the result: 1"
+            "without an array are left out of the result: 1."
         )
 
     def test_account_id_counts_per_array(self, pure1_client):
@@ -870,7 +894,7 @@ class TestGenerateAccountsDict:
         }
         module.warn.assert_called_once_with(
             "Object store accounts that Pure1 returned without a name or "
-            "without an array are left out of the result: 1"
+            "without an array are left out of the result: 1."
         )
 
     @pytest.mark.parametrize(
@@ -927,7 +951,7 @@ class TestGenerateAccountsDict:
         }
         module.warn.assert_called_once_with(
             "Buckets that Pure1 returned without a name, without an account or "
-            "without an array are left out of the result: 1"
+            "without an array are left out of the result: 1."
         )
 
     def test_objects_left_out_give_one_warning_per_kind(self, pure1_client):
@@ -955,11 +979,11 @@ class TestGenerateAccountsDict:
         assert [call[0] for call in module.warn.call_args_list] == [
             (
                 "Object store accounts that Pure1 returned without a name or "
-                "without an array are left out of the result: 2",
+                "without an array are left out of the result: 2.",
             ),
             (
                 "Buckets that Pure1 returned without a name, without an account "
-                "or without an array are left out of the result: 3",
+                "or without an array are left out of the result: 3.",
             ),
         ]
 
@@ -990,7 +1014,7 @@ class TestGenerateAccountsDict:
         }
         module.warn.assert_called_once_with(
             "Buckets that Pure1 returned without a name, without an account or "
-            "without an array are left out of the result: 2"
+            "without an array are left out of the result: 2."
         )
 
     def test_null_beside_an_array_is_passed_over(self, pure1_client):
@@ -1224,11 +1248,7 @@ class TestGenerateAccountsDict:
                 ),
             },
         }
-        module.warn.assert_called_once_with(
-            "Pure1 returned 2 object store accounts under the name of another "
-            "account of the same array: of each such name only the account "
-            "created last is in the result, with its buckets."
-        )
+        module.warn.assert_called_once_with(SAME_ACCOUNT_NAME.format(2))
 
     def test_buckets_of_one_name_in_an_account_give_the_one_created_last(
         self, pure1_client
@@ -1268,11 +1288,7 @@ class TestGenerateAccountsDict:
                 ),
             }
         }
-        module.warn.assert_called_once_with(
-            "Pure1 returned 3 buckets under the name of another bucket of the "
-            "same account: of each such name only the bucket created last is in "
-            "the result."
-        )
+        module.warn.assert_called_once_with(SAME_BUCKET_NAME.format(3))
 
     def test_object_that_pure1_lists_twice_is_one_object(self, pure1_client):
         module = ansible_module(**_params())
@@ -1340,17 +1356,118 @@ class TestGenerateAccountsDict:
             }
         }
         assert [call[0] for call in module.warn.call_args_list] == [
-            (
-                "Pure1 returned 1 object store accounts under the name of "
-                "another account of the same array: of each such name only the "
-                "account created last is in the result, with its buckets.",
-            ),
-            (
-                "Pure1 returned 1 buckets under the name of another bucket of "
-                "the same account: of each such name only the bucket created "
-                "last is in the result.",
-            ),
+            (SAME_ACCOUNT_NAME.format(1),),
+            (SAME_BUCKET_NAME.format(1),),
         ]
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({}, id="every array"),
+            pytest.param({"array": ["array1"]}, id="array"),
+        ],
+    )
+    def test_two_arrays_of_one_name_are_not_merged(self, pure1_client, params):
+        """The array that Pure1 returns first keeps the name
+
+        An account of the other array is not another account of the same
+        array, and its buckets are not buckets of the first array.
+        """
+        module = ansible_module(**_params(**params))
+        first = ("array1", "array-id-1")
+        second = ("array1", "array-id-2")
+        pure1_client.get_arrays.return_value = valid_response(
+            [
+                sdk_model("Array", id=array_id, name=name)
+                for name, array_id in (first, second)
+            ]
+        )
+        _answer(
+            pure1_client,
+            buckets=[
+                _make_bucket(arrays=[_on(*first)]),
+                _make_bucket(arrays=[_on(*second)], id="b2", object_count=5),
+                _make_bucket("bucket3", arrays=[_on(*second)]),
+                _make_bucket(
+                    "bucket4", account="account2", arrays=[_on(*second), _on(*first)]
+                ),
+            ],
+            accounts=[
+                _make_account(arrays=[_on(*first)]),
+                _make_account(arrays=[_on(*second)], id="a2", object_count=7),
+                # on both arrays: filed under the first and counted once
+                _make_account("account2", arrays=[_on(*second), _on(*first)]),
+                _make_account("account3", arrays=[_on(*second)]),
+            ],
+        )
+
+        result = generate_accounts_dict(module, pure1_client)
+
+        assert result == {
+            "array1": {
+                "account1": _account_row(buckets={"bucket1": _bucket_row()}),
+                "account2": _account_row(
+                    "account2", buckets={"bucket4": _bucket_row("bucket4")}
+                ),
+            }
+        }
+        assert [call[0] for call in module.warn.call_args_list] == [
+            (OTHER_ARRAY_ACCOUNTS.format(3),),
+            (OTHER_ARRAY_BUCKETS.format(3),),
+        ]
+
+    def test_buckets_alone_tell_two_arrays_of_one_name_apart(self, pure1_client):
+        """With a selection of buckets that no account is listed for"""
+        module = ansible_module(**_params(destroyed=True))
+        _answer(
+            pure1_client,
+            buckets=[
+                _make_bucket(arrays=[_on("array1", "array-id-1")], destroyed=True),
+                _make_bucket(
+                    "bucket2", arrays=[_on("array1", "array-id-2")], destroyed=True
+                ),
+            ],
+        )
+
+        result = generate_accounts_dict(module, pure1_client)
+
+        assert result == {
+            "array1": {
+                "account1": _account_row(
+                    buckets={"bucket1": _bucket_row(destroyed=True)}, **REFERENCE_ONLY
+                )
+            }
+        }
+        module.warn.assert_called_once_with(OTHER_ARRAY_BUCKETS.format(1))
+
+    def test_array_named_in_another_case_is_not_of_the_task(self, pure1_client):
+        """Pure1 matches the name of an array without regard to case, so a
+        task that names array1 is also answered with what is on ARRAY1"""
+        module = ansible_module(**_params(array=["array1"]))
+        pure1_client.get_arrays.return_value = valid_response(
+            [
+                sdk_model("Array", id="array-id-1", name="array1"),
+                sdk_model("Array", id="array-id-2", name="ARRAY1"),
+            ]
+        )
+        _answer(
+            pure1_client,
+            buckets=[
+                _make_bucket(arrays=[_on("array1", "array-id-1")]),
+                _make_bucket("bucket2", arrays=[_on("ARRAY1", "array-id-2")]),
+            ],
+            accounts=[
+                _make_account(arrays=[_on("array1", "array-id-1")]),
+                _make_account(arrays=[_on("ARRAY1", "array-id-2")], id="a2"),
+            ],
+        )
+
+        result = generate_accounts_dict(module, pure1_client)
+
+        assert result == {
+            "array1": {"account1": _account_row(buckets={"bucket1": _bucket_row()})}
+        }
+        module.warn.assert_not_called()
 
 
 class TestPure1BucketsMain:
@@ -1656,11 +1773,11 @@ class TestPure1BucketsMain:
         assert [call[0] for call in module.warn.call_args_list] == [
             (
                 "Object store accounts that Pure1 returned without a name or "
-                "without an array are left out of the result: 1",
+                "without an array are left out of the result: 1.",
             ),
             (
                 "Buckets that Pure1 returned without a name, without an account "
-                "or without an array are left out of the result: 1",
+                "or without an array are left out of the result: 1.",
             ),
         ]
         module.exit_json.assert_called_once_with(

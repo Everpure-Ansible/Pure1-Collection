@@ -59,8 +59,9 @@ options:
   name:
     description:
       - Names of the resources to collect metrics for. Every resource of
-        I(resource_type) is selected when neither I(name) nor I(ids) is set
-        or when they are empty, on the arrays of I(array) if that is set.
+        I(resource_type) is selected when neither I(name) nor I(ids) is set,
+        or the one that is given is empty, on the arrays of I(array) if that
+        is set.
       - A name is matched without regard to case, and it selects every
         resource of that name, which can be one on each of several arrays.
       - Give the whole name as Pure1 has it. A volume in a pod is named
@@ -70,6 +71,8 @@ options:
         200 names of 20 characters and fewer when they are longer. With more
         the task fails with the message that the request is too long. Select
         with I(array), or use several tasks.
+      - Mutually exclusive with I(ids). A task that gives both options fails,
+        also when one of them is an empty list.
     type: list
     elements: str
   ids:
@@ -81,8 +84,9 @@ options:
         one of the IDs.
       - All IDs of a task go into one request to Pure1, which holds about
         130 of them. With more the task fails with the message that the
-        request is too long, which speaks of names. Select with I(array),
-        or use several tasks.
+        request is too long. Select with I(array), or use several tasks.
+      - Mutually exclusive with I(name). A task that gives both options
+        fails, also when one of them is an empty list.
     type: list
     elements: str
   array:
@@ -93,7 +97,7 @@ options:
         pod is selected when one of its arrays is named.
       - A name is matched without regard to case, and the result has the
         name as Pure1 spells it.
-      - The task fails when Pure1 does not know one of the names.
+      - A name that Pure1 does not know fails the task.
       - Not valid with I(resource_type=subscription-licenses).
     type: list
     elements: str
@@ -116,9 +120,9 @@ options:
     type: int
   window:
     description:
-      - How far back from now to collect data points, in seconds. The default
-        is one day. It cannot be set together with I(start_time) and
-        I(end_time), which take its place.
+      - How far back from now to collect data points, in seconds. Must be 1
+        or more. The default is one day. Mutually exclusive with
+        I(start_time) and I(end_time), which take its place.
       - With the default I(resolution) of one day this asks for one point for
         each metric, which covers the last 24 hours.
       - Pure1 publishes data points with a delay, so a window can hold no
@@ -130,12 +134,14 @@ options:
   start_time:
     description:
       - Start of the time range to collect data points of, in milliseconds
-        since the epoch. Requires I(end_time).
+        since the epoch. Requires I(end_time). Mutually exclusive with
+        I(window).
     type: int
   end_time:
     description:
       - End of the time range to collect data points of, in milliseconds
-        since the epoch. Requires I(start_time).
+        since the epoch. Requires I(start_time). Mutually exclusive with
+        I(window).
     type: int
   history:
     description:
@@ -284,7 +290,7 @@ EXAMPLES = r"""
 
 RETURN = r"""
 pure1_metrics:
-  description: Returns the metric data collected from Pure1
+  description: The metric data collected from Pure1.
   returned: always
   type: dict
   contains:
@@ -376,9 +382,9 @@ pure1_metrics:
               type: int
             timestamp:
               description:
-                - Time of the last data point in the time range, as C(YYYY-MM-DD HH:MM:SS UTC). Pure1 stamps
-                  a point with the start of the period it covers. For a daily point that is the start of
-                  the time range plus whole days for some series and 00:00 UTC for others.
+                - Time of the last data point in the time range, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC). Pure1
+                  stamps a point with the start of the period it covers. For a daily point that is the start
+                  of the time range plus whole days for some series and 00:00 UTC for others.
                 - Null when Pure1 has no data point in the time range, and for a C(pod_array_) metric,
                   whose points are in C(arrays).
               type: str
@@ -407,7 +413,7 @@ pure1_metrics:
               type: dict
               contains:
                 timestamp:
-                  description: Time of the last data point, as C(YYYY-MM-DD HH:MM:SS UTC). Null when there is no point.
+                  description: Time of the last data point, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC). Null when there is no point.
                   type: str
                 timestamp_epoch:
                   description: Time of the last data point, in milliseconds since the epoch.
@@ -445,7 +451,7 @@ pure1_metrics:
             resolution: 86400000
             timestamp: "2026-01-02 03:04:05 UTC"
             timestamp_epoch: 1767323045000
-            value: 1099511627776.0
+            value: 1099511627776
     skipped: []
 """
 
@@ -458,7 +464,6 @@ from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     get_pure1,
     pure1_argument_spec,
     pure1_attr,
-    pure1_items,
     pure1_list,
     pure1_resolve_arrays,
     pure1_time,
@@ -556,8 +561,8 @@ def metric_catalog(module, pure_1, resource_type):
         }
     if left_out:
         module.warn(
-            "Pure1 returned {0} metrics without a name: they are left out of "
-            "the result.".format(left_out)
+            "Metrics that Pure1 returned without a name are left out of the "
+            "result: {0}.".format(left_out)
         )
     return catalog
 
@@ -784,8 +789,8 @@ def select_resources(module, pure_1, resource_type, metrics):
         fail_not_known(module, resource_type, missing, True)
     if left_out:
         module.warn(
-            "Pure1 returned {0} {1} without an ID: they are left out of the "
-            "result.".format(left_out, KINDS[resource_type][1].lower())
+            "{0} that Pure1 returned without an ID are left out of the "
+            "result: {1}.".format(KINDS[resource_type][1], left_out)
         )
     return resources
 
@@ -834,17 +839,23 @@ def batches(metrics, resource_ids):
 
 
 def request_history(module, pure_1, query, names, resource_ids):
-    """Return the series of one request, or raise Pure1RequestError"""
-    return pure1_items(
+    """Return the listing of the series of one request, or raise Pure1RequestError
+
+    Pure1 gives the series of a request in one answer and the call takes no
+    paging keyword, so no second request is made: an answer with fewer
+    series than Pure1 counted is a listing that is truncated.
+    """
+    return pure1_list(
         module,
         "get_metrics_history",
-        lambda: pure_1.get_metrics_history(
+        lambda **page: pure_1.get_metrics_history(
             aggregation=query["aggregation"],
             end_time=query["end_time"],
             resolution=query["resolution"],
             start_time=query["start_time"],
             names=names,
             resource_ids=resource_ids,
+            **page
         ),
         fail=False,
     )
@@ -861,11 +872,12 @@ def names_id(text, resource_id):
 
 
 def read_history(module, pure_1, query, names, resource_ids, gone, skip_missing):
-    """Return the series of the metrics for the resources
+    """Return the listing of the series of the metrics for the resources
 
     Pure1 answers 404 for the whole request when it does not know one of the
     resources, and names them. With skip_missing those are added to gone and
-    the others are asked for again. Any other error fails the task.
+    the others are asked for again. Any other error fails the task. None
+    when no resource is left to ask for.
     """
     resource_ids = [
         resource_id for resource_id in resource_ids if resource_id not in gone
@@ -889,7 +901,7 @@ def read_history(module, pure_1, query, names, resource_ids, gone, skip_missing)
                 for resource_id in resource_ids
                 if resource_id not in missing
             ]
-    return []
+    return None
 
 
 def last_point(series, history):
@@ -993,36 +1005,53 @@ def collect_metrics(module, pure_1, resource_type, catalog):
     gone = []
     array_ids = {}
     not_filed = {"unknown": 0, "same name": 0, "empty": 0}
+    # The series over all requests: those that came, those Pure1 counted,
+    # and whether an answer had fewer than it counted
+    returned = 0
+    counted = 0
+    short = False
     # Pure1 refuses the metrics of a pod and those of its arrays in one request
     for group in (
         [name for name in metrics if not per_array(catalog[name])],
         [name for name in metrics if per_array(catalog[name])],
     ):
         for names, resource_ids in batches(group, list(resources)):
-            for found in read_history(
+            listing = read_history(
                 module, pure_1, query, names, resource_ids, gone, skip_missing
-            ):
+            )
+            if listing is None:
+                continue
+            returned += len(listing.items)
+            short = short or listing.truncated
+            if counted is not None:
+                counted = None if listing.total is None else counted + listing.total
+            for found in listing.items:
                 reason = file_series(found, resources, array_ids, history)
                 if reason:
                     not_filed[reason] += 1
     for resource_id in gone:
         del resources[resource_id]
+    if short:
+        module.warn(
+            "Pure1 returned {0} of {1} metric series: the result may be "
+            "incomplete.".format(
+                returned, "an unknown number of" if counted is None else counted
+            )
+        )
     if gone:
         module.warn(
-            "Pure1 no longer knows {0} of the {1} it listed: they are named in "
-            "skipped and are not in resources.".format(
-                len(gone), KINDS[resource_type][1].lower()
-            )
+            "{0} that Pure1 listed and no longer knows are named in skipped and "
+            "are not in resources: {1}.".format(KINDS[resource_type][1], len(gone))
         )
     if not_filed["unknown"]:
         module.warn(
-            "Pure1 returned {0} series that are of no resource and metric of the "
-            "task: they are left out of the result.".format(not_filed["unknown"])
+            "Series that Pure1 returned for no resource and metric of the task "
+            "are left out of the result: {0}.".format(not_filed["unknown"])
         )
     if not_filed["same name"]:
         module.warn(
-            "Pure1 returned {0} series for another array of the same name in one "
-            "pod: they are left out of the result.".format(not_filed["same name"])
+            "Series that Pure1 returned for another array of the same name in "
+            "one pod are left out of the result: {0}.".format(not_filed["same name"])
         )
     if resources and not any(
         has_point(row)

@@ -2060,6 +2060,77 @@ class TestFailures:
             getattr(pure1_client, listing).assert_not_called()
 
 
+def _documented():
+    return yaml.safe_load(pure1_replica_links.RETURN)["pure1_replica_links"]
+
+
+def _assert_keys(result, documented):
+    """Compare a result with what RETURN describes, key by key, both ways"""
+    assert set(result) == set(documented)
+    summary = documented["summary"]["contains"]
+    assert set(result["summary"]) == set(summary)
+    for kind in ("pods", "file_systems", "buckets"):
+        keys = documented[kind]["contains"]
+        for link in result[kind]:
+            assert set(link) == set(keys)
+            for side in ("sources", "targets"):
+                member_keys = keys[side]["contains"]
+                for member in link[side]:
+                    assert set(member) == set(member_keys)
+                    for array in member["arrays"]:
+                        assert set(array) == set(member_keys["arrays"]["contains"])
+        assert set(result["summary"][kind]) == set(summary[kind]["contains"])
+    for targets in result["replication_targets"].values():
+        for target in targets:
+            assert set(target) == set(documented["replication_targets"]["contains"])
+    assert set(result["summary"]["replication_targets"]) == set(
+        summary["replication_targets"]["contains"]
+    )
+
+
+class TestDocumentation:
+    """RETURN describes what the module returns, in both directions."""
+
+    def test_return_has_the_keys_of_a_result(self, pure1_client):
+        _answer_everything(pure1_client)
+
+        result = _result(run_main(pure1_replica_links))
+
+        _assert_keys(result, _documented()["contains"])
+        # The comparison saw a link of each type with its members and their
+        # arrays, and a replication target
+        assert result == EVERYTHING
+
+    def test_sample_has_the_keys_of_a_result(self):
+        sample = _documented()["sample"]
+
+        _assert_keys(sample, _documented()["contains"])
+        assert sample["pods"][0]["sources"][0]["arrays"]
+        assert sample["file_systems"][0]["targets"][0]["arrays"]
+        assert sample["replication_targets"]["array3"]
+
+    def test_sample_is_the_result_of_one_run(self):
+        """Every age is measured against the one time at which the module ran"""
+        sample = _documented()["sample"]
+
+        ran = set()
+        for kind in ("pods", "file_systems", "buckets"):
+            for link in sample[kind]:
+                for key in ("as_of", "recovery_point"):
+                    assert link[key] == pure1_replica_links.pure1_time(
+                        link[key + "_epoch"]
+                    )
+                assert link["lag_seconds"] == link["lag"] // 1000
+                ran.add(link["as_of_epoch"] // 1000 + link["as_of_age_seconds"])
+            assert sample["summary"][kind] == pure1_replica_links.summarise_links(
+                sample[kind]
+            )
+        assert len(ran) == 1
+        # as Pure1 has been seen to report the lag of a file-system link
+        (link,) = sample["file_systems"]
+        assert link["lag"] == link["as_of_epoch"] - link["recovery_point_epoch"]
+
+
 MODULE = "everpure.pure1.pure1_replica_links"
 
 

@@ -174,6 +174,7 @@ def _typical_components():
 
 
 NEWER_TEXT = "2021-02-03 13:04:05 UTC"
+OLDER_TEXT = "2021-02-02 13:04:04 UTC"
 TYPICAL_RESULT = {
     "hardware": {
         "array1": {
@@ -603,6 +604,112 @@ class TestOptions:
         assert [entry["array"] for entry in result["identifying"]] == ["Array2"]
         module.warn.assert_not_called()
 
+    def test_array_of_the_same_name_in_another_case_is_left_out(self, pure1_client):
+        """Pure1 matches the name of an array whatever its case, so both
+        listings of a task that names array1 also hold what ARRAY1 has."""
+        pure1_client.get_arrays.side_effect = [
+            valid_response(),
+            valid_response([sdk_model("Array", name="array1", id="array-id-1")]),
+        ]
+        named = dict(id="array-id-1", fqdn="array1.example.com")
+        other = dict(id="array-id-2", fqdn="other.example.com")
+        pure1_client.get_hardware.return_value = valid_response(
+            [
+                _component(
+                    "CH1.FM1.ETH1",
+                    "ARRAY1",
+                    other,
+                    status="critical",
+                    identify_enabled=True,
+                ),
+                _component("CH1.FM1.ETH1", "array1", named, status="healthy"),
+                _component("CH1.FM1.ETH2", "ARRAY1", other, status="healthy"),
+            ]
+        )
+        pure1_client.get_hardware_connectors.return_value = valid_response(
+            [
+                _connector("CH1.FM1.ETH1", "ARRAY1", other, connector_type="RJ-45"),
+                _typical_connector("CH1.FM1.ETH1", "array1"),
+            ]
+        )
+
+        module = run_main(pure1_hardware, array=["array1"], connectors=True)
+
+        assert pure1_client.get_arrays.call_args_list == [
+            call(limit=0),
+            call(filter="name='array1'"),
+        ]
+        pure1_client.get_hardware.assert_called_once_with(filter="arrays.name='array1'")
+        pure1_client.get_hardware_connectors.assert_called_once_with(
+            filter="arrays.name='array1'"
+        )
+        module.exit_json.assert_called_once_with(
+            changed=False,
+            pure1_hardware={
+                "hardware": {
+                    "array1": {
+                        "CH1.FM1.ETH1": _row(status="healthy", connector=CONNECTOR)
+                    }
+                },
+                "arrays": {
+                    "array1": _summary(
+                        id="array-id-1",
+                        fqdn="array1.example.com",
+                        by_status={"healthy": 1},
+                    )
+                },
+                "unhealthy": [],
+                "identifying": [],
+            },
+        )
+        # What was not asked for is no loss
+        module.warn.assert_not_called()
+
+    def test_connectors_of_an_array_that_was_not_named_are_left_out(self, pure1_client):
+        """The listing of the connectors holds those of ARRAY1 as well, and
+        those of an array1 that is not the one the task resolved: none of
+        them was asked for, so none is a loss that a warning counts."""
+        pure1_client.get_arrays.side_effect = [
+            valid_response(),
+            valid_response([sdk_model("Array", name="array1", id="array-id-1")]),
+        ]
+        named = dict(id="array-id-1")
+        other = dict(id="array-id-2")
+        namesake = dict(id="array-id-9")
+        pure1_client.get_hardware.return_value = valid_response(
+            [_component("CH1.FM1.ETH1", "array1", named, type="eth_port")]
+        )
+        pure1_client.get_hardware_connectors.return_value = valid_response(
+            [
+                # Two of one name: filed, the second would count as repeated
+                _connector("CH1.FM1.ETH1", "ARRAY1", other, connector_type="RJ-45"),
+                _connector("CH1.FM1.ETH1", "ARRAY1", other, connector_type="RJ-45"),
+                # Filed, it would count as one of an array of the same name
+                _connector("CH1.FM1.ETH1", "array1", namesake, connector_type="RJ-45"),
+                _connector("CH1.FM1.ETH1", "array1", named, **CONNECTOR),
+            ]
+        )
+
+        module = run_main(pure1_hardware, array=["array1"], connectors=True)
+
+        pure1_client.get_hardware_connectors.assert_called_once_with(
+            filter="arrays.name='array1'"
+        )
+        module.exit_json.assert_called_once_with(
+            changed=False,
+            pure1_hardware={
+                "hardware": {
+                    "array1": {
+                        "CH1.FM1.ETH1": _row(type="eth_port", connector=CONNECTOR)
+                    }
+                },
+                "arrays": {"array1": _summary(id="array-id-1")},
+                "unhealthy": [],
+                "identifying": [],
+            },
+        )
+        module.warn.assert_not_called()
+
     def test_array_that_pure1_does_not_know_fails_the_task(self, pure1_client):
         _known_arrays(pure1_client, "array1")
 
@@ -683,6 +790,40 @@ class TestOptions:
             msg="parameters are mutually exclusive: status|unhealthy_only"
         )
         pure1_client.get_hardware.assert_not_called()
+
+    @pytest.mark.parametrize("unhealthy_only", [True, False])
+    def test_empty_status_with_unhealthy_only_is_refused_as_the_options_say(
+        self, pure1_client, unhealthy_only
+    ):
+        """Alone an empty list counts as not set; the exclusion sees it as given."""
+        module = run_main(pure1_hardware, status=[], unhealthy_only=unhealthy_only)
+
+        module.fail_json.assert_called_once_with(
+            msg="parameters are mutually exclusive: status|unhealthy_only"
+        )
+        pure1_client.get_hardware.assert_not_called()
+        options = yaml.safe_load(pure1_hardware.DOCUMENTATION)["options"]
+        for option in ("status", "unhealthy_only"):
+            assert (
+                "A task that gives both options fails, also when I(status) is an "
+                "empty list or I(unhealthy_only) is C(false)."
+            ) in " ".join(options[option]["description"])
+
+    @pytest.mark.parametrize("option", ["type", "status"])
+    def test_empty_list_counts_as_not_set_as_the_option_says(
+        self, pure1_client, option
+    ):
+        pure1_client.get_hardware.return_value = valid_response([_component()])
+
+        module = run_main(pure1_hardware, **{option: []})
+
+        pure1_client.get_hardware.assert_called_once_with(filter=None)
+        assert list(_result(module)["hardware"]) == ["array1"]
+        options = yaml.safe_load(pure1_hardware.DOCUMENTATION)["options"]
+        assert (
+            "An empty list counts as not set, and the components are not "
+            "narrowed by {0}.".format(option)
+        ) in " ".join(options[option]["description"])
 
     def test_value_that_is_no_boolean_is_refused(self, pure1_client):
         module = run_main(pure1_hardware, connectors="perhaps")
@@ -1147,6 +1288,26 @@ class TestAbsentArrays:
         module = run_main(pure1_hardware, array=["array1"], type=[], status=[])
 
         pure1_client.get_hardware.assert_called_once_with(filter="arrays.name='array1'")
+        module.warn.assert_called_once_with(
+            "Pure1 returned no hardware component for array array1, which is "
+            "absent from the result."
+        )
+
+    def test_named_array_is_absent_when_only_its_namesake_has_components(
+        self, pure1_client
+    ):
+        """The components of ARRAY1 do not stand in for those of array1."""
+        pure1_client.get_arrays.side_effect = [
+            valid_response(),
+            valid_response([sdk_model("Array", name="array1", id="array-id-1")]),
+        ]
+        pure1_client.get_hardware.return_value = valid_response(
+            [_component("CT0", "ARRAY1", dict(id="array-id-2"), status="ok")]
+        )
+
+        module = run_main(pure1_hardware, array=["array1"])
+
+        module.exit_json.assert_called_once_with(changed=False, pure1_hardware=EMPTY)
         module.warn.assert_called_once_with(
             "Pure1 returned no hardware component for array array1, which is "
             "absent from the result."
@@ -1627,8 +1788,258 @@ class TestFailures:
         pure1_client.get_hardware.assert_not_called()
 
 
+def _documented():
+    return yaml.safe_load(pure1_hardware.RETURN)["pure1_hardware"]
+
+
+def _assert_keys(result, documented, connectors=False):
+    """Compare a result with what RETURN describes, key by key, both ways.
+
+    connector is a key of a component only with the connectors option, as
+    its returned says.
+    """
+    assert set(result) == set(documented)
+    component_keys = dict(documented["hardware"]["contains"])
+    connector_keys = component_keys["connector"]["contains"]
+    if not connectors:
+        del component_keys["connector"]
+    for components in result["hardware"].values():
+        for row in components.values():
+            assert set(row) == set(component_keys)
+            if row.get("connector") is not None:
+                assert set(row["connector"]) == set(connector_keys)
+    for summary in result["arrays"].values():
+        assert set(summary) == set(documented["arrays"]["contains"])
+    for entry in result["unhealthy"]:
+        assert set(entry) == set(documented["unhealthy"]["contains"])
+    for entry in result["identifying"]:
+        assert set(entry) == set(documented["identifying"]["contains"])
+
+
+class TestReturn:
+    """RETURN describes what the module returns, in both directions."""
+
+    def test_return_has_the_keys_of_a_result(self, pure1_client):
+        pure1_client.get_hardware.return_value = valid_response(
+            _typical_components() + [_component("CH1.FM1.ETH1", type="eth_port")]
+        )
+
+        result = _result(run_main(pure1_hardware))
+
+        _assert_keys(result, _documented()["contains"])
+        # The comparison saw a summary and an entry of each list
+        assert result["arrays"] and result["unhealthy"] and result["identifying"]
+
+    def test_return_has_the_keys_of_a_result_with_connectors(self, pure1_client):
+        pure1_client.get_hardware.return_value = valid_response(
+            _typical_components() + [_component("CH1.FM1.ETH1", type="eth_port")]
+        )
+        pure1_client.get_hardware_connectors.return_value = valid_response(
+            [_typical_connector()]
+        )
+
+        result = _result(run_main(pure1_hardware, connectors=True))
+
+        _assert_keys(result, _documented()["contains"], connectors=True)
+        # The comparison saw a port with a connector and one without
+        ports = result["hardware"]["array1"]
+        assert ports["CH1.FM1.ETH1"]["connector"] == CONNECTOR
+        assert ports["CT0.ETH4"]["connector"] is None
+        assert result["unhealthy"] and result["identifying"]
+        connector = _documented()["contains"]["hardware"]["contains"]["connector"]
+        assert connector["returned"] == "when I(connectors) is true"
+
+    def test_sample_has_the_keys_of_a_result(self):
+        sample = _documented()["sample"]
+
+        _assert_keys(sample, _documented()["contains"])
+        assert sample["hardware"]["array1"] and sample["arrays"]["array1"]
+        assert sample["unhealthy"] and sample["identifying"]
+
+    @pytest.mark.usefixtures("localtime_ahead_of_utc")
+    def test_sample_is_what_the_module_returns(self, pure1_client):
+        sample = _documented()["sample"]
+        components = []
+        for array, rows in sample["hardware"].items():
+            summary = sample["arrays"][array]
+            reference = dict(id=summary["id"], fqdn=summary["fqdn"])
+            for name, row in rows.items():
+                fields = {
+                    key: value
+                    for key, value in row.items()
+                    if key not in ("as_of", "as_of_epoch")
+                }
+                components.append(
+                    _component(
+                        name, array, reference, as_of=row["as_of_epoch"], **fields
+                    )
+                )
+        # Pure1 sorts nothing
+        pure1_client.get_hardware.return_value = valid_response(components[::-1])
+
+        module = run_main(pure1_hardware)
+
+        assert len(components) == 4
+        module.exit_json.assert_called_once_with(changed=False, pure1_hardware=sample)
+        module.warn.assert_not_called()
+
+
+MODULE = "everpure.pure1.pure1_hardware"
+
+
+def _template(text, variables):
+    """Return what ansible-core makes of a template of a task."""
+    templar = Templar(loader=None, variables=variables)
+    return templar.template(trust_as_template(text))
+
+
+def _play_examples(client, **served):
+    """Run the tasks of EXAMPLES in their order and return what they make
+
+    A task of the module runs through main() with the options of the example
+    and registers its result. Pure1 knows the arrays that the task names and
+    answers with what served gives under the name the task registers:
+    components, and connectors for a task that asks for them. Every other
+    task is returned under the name that the task of the module before it
+    registered, as a list with one entry for each item of its loop, one
+    without a loop: its when, and unless that is false the templates of its
+    arguments, as ansible-core evaluates them.
+    """
+    registered = {}
+    made = {}
+    reads = None
+    for task in yaml.safe_load(pure1_hardware.EXAMPLES):
+        options = task.get(MODULE)
+        if options is not None:
+            options = {
+                name: value
+                for name, value in options.items()
+                if name not in ("app_id", "key_file")
+            }
+            reads = task["register"]
+            listings = served.get(reads, {})
+            if "array" in options:
+                _known_arrays(client, *options["array"])
+            else:
+                # The check that get_pure1 makes
+                client.get_arrays.side_effect = [valid_response()]
+            client.get_hardware.return_value = valid_response(
+                listings.get("components", [])
+            )
+            client.get_hardware_connectors.return_value = valid_response(
+                listings.get("connectors", [])
+            )
+            module = run_main(pure1_hardware, **options)
+            registered[reads] = dict(module.exit_json.call_args[1])
+            made[reads] = []
+            continue
+        (action,) = set(task) - {"name", "when", "loop", "vars"}
+        variables = dict(registered)
+        items = _template(task["loop"], variables) if "loop" in task else [None]
+        entries = []
+        for item in items:
+            scope = dict(variables, item=item)
+            entry = {}
+            if "when" in task:
+                entry["when"] = _template("{{ " + task["when"] + " }}", scope)
+            if entry.get("when", True):
+                for key, value in task[action].items():
+                    if key == "that":
+                        entry[key] = [
+                            _template("{{ " + each + " }}", scope) for each in value
+                        ]
+                    elif isinstance(value, str):
+                        entry[key] = _template(value, scope)
+            entries.append(entry)
+        made[reads].append(entries)
+    return made
+
+
+def _what_the_examples_name():
+    """Return what Pure1 answers each task of EXAMPLES, by the name it registers"""
+    blade = dict(id="array-id-2")
+    return dict(
+        hardware=dict(components=_typical_components()),
+        # What the filter of the task leaves of the two arrays
+        faults=dict(
+            components=[
+                component
+                for component in _typical_components()
+                if component.status == "critical"
+            ]
+        ),
+        power=dict(
+            components=[
+                _component("CH0.PWR0", type="power_supply", status="ok"),
+                _component("CH0.PWR1", type="power_supply", status="ok"),
+                _component("CH1.FAN0", "array2", type="fan", status="healthy"),
+            ]
+        ),
+        empty=dict(
+            components=[
+                _component("CH0.BAY2", type="drive_bay", status="not_installed"),
+                _component("CH0.BAY3", type="drive_bay", status="not_installed"),
+            ]
+        ),
+        ports=dict(
+            components=[
+                _component("CH1.FM1.ETH1", "array2", blade, type="eth_port"),
+                _component("CH1.FM1.ETH2", "array2", blade, type="eth_port"),
+            ],
+            connectors=[_typical_connector("CH1.FM1.ETH1", "array2")],
+        ),
+    )
+
+
 class TestExamples:
-    """What the examples compute."""
+    """The tasks of EXAMPLES, on what the module returns."""
+
+    def test_examples_read_what_the_module_returns(self, pure1_client):
+        made = _play_examples(pure1_client, **_what_the_examples_name())
+
+        assert list(made) == ["hardware", "faults", "power", "empty", "ports"]
+        assert made["hardware"] == [
+            [{"msg": TYPICAL_RESULT["unhealthy"]}],
+            # The data of the fixtures is years old
+            [
+                {"when": True, "msg": "array1 was last refreshed at " + OLDER_TEXT},
+                {"when": True, "msg": "array2 was last refreshed at " + NEWER_TEXT},
+            ],
+        ]
+        assert made["faults"] == [
+            [{"that": [False], "fail_msg": "1 components need attention"}]
+        ]
+        assert made["power"] == [[{"msg": "array1 has 2"}, {"msg": "array2 has 1"}]]
+        # ansible-core gives a number as text up to 2.18 and as a number after
+        assert [[str(entry["msg"]) for entry in task] for task in made["empty"]] == [
+            ["2"]
+        ]
+        assert made["ports"] == [
+            [{"when": True, "msg": "CH1.FM1.ETH1 100GBASE-CR4"}, {"when": False}]
+        ]
+
+    def test_examples_when_pure1_has_nothing_for_them(self, pure1_client):
+        """No component at all: every task still evaluates."""
+        made = _play_examples(pure1_client)
+
+        assert made["hardware"] == [[{"msg": []}], []]
+        assert made["faults"] == [
+            [{"that": [True], "fail_msg": "0 components need attention"}]
+        ]
+        assert made["power"] == [[]]
+        assert [[str(entry["msg"]) for entry in task] for task in made["empty"]] == [
+            ["0"]
+        ]
+        assert made["ports"] == [[]]
+
+    def test_port_without_a_connector_is_not_shown(self, pure1_client):
+        """What a FlashArray gives: ports, and no connector in Pure1."""
+        served = _what_the_examples_name()
+        served["ports"] = dict(components=served["ports"]["components"])
+
+        made = _play_examples(pure1_client, **served)
+
+        assert made["ports"] == [[{"when": False}, {"when": False}]]
 
     @pytest.mark.usefixtures("host_west_of_utc")
     @pytest.mark.parametrize(

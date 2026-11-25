@@ -2391,10 +2391,18 @@ class TestDocumentation:
         assert says in " ".join(entry["description"])
 
     def test_documentation_names_the_py_pure_client_release_of_the_calls(self):
+        """The calls came with the release the collection requires: the note
+        names the calls and their Pure1 REST version, and no release"""
         documentation = yaml.safe_load(pure1_recommendations.DOCUMENTATION)
 
         assert documentation["version_added"] == "1.6.0"
-        assert "C(py-pure-client) 1.99.0 or later" in " ".join(documentation["notes"])
+        calls = ["C({0})".format(method) for method in pure1_recommendations.METHODS]
+        assert documentation["notes"] == [
+            "This module makes the Pure1 REST 1.6 calls {0} and {1}.".format(
+                ", ".join(calls[:-1]), calls[-1]
+            )
+        ]
+        assert "py-pure-client" not in " ".join(documentation["notes"])
 
     def test_examples_use_every_option_of_the_module(self):
         options = set(yaml.safe_load(pure1_recommendations.DOCUMENTATION)["options"])
