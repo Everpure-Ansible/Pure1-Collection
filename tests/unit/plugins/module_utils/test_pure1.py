@@ -557,6 +557,83 @@ class TestGetPure1:
 
         assert "private_key_password" not in client_factory.call_args[1]
 
+    def test_version_is_given_to_the_client(self, client_factory, pure1_client):
+        """A module whose call must go to one Pure1 REST version names it."""
+        result = get_pure1(ansible_module(), version="1.6")
+
+        client_factory.assert_called_once()
+        assert client_factory.call_args[0] == ()
+        call_kwargs = client_factory.call_args[1]
+        assert call_kwargs["version"] == "1.6"
+        assert set(call_kwargs) == {
+            "version",
+            "app_id",
+            "private_key_file",
+            "configuration",
+        }
+        # everything else is as without a version
+        assert call_kwargs["app_id"] == "pure1-app-id"
+        assert call_kwargs["private_key_file"] == "/run/secrets/pure1.pem"
+        assert call_kwargs["configuration"].verify_ssl is True
+        header, value = pure1_client._api_client.set_default_header.call_args[0]
+        assert header == "User-Agent"
+        assert value.startswith("Ansible ")
+        pure1_client.get_arrays.assert_called_once_with(limit=0)
+        assert result == pure1_client
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            pytest.param({}, id="not given"),
+            pytest.param({"version": None}, id="None"),
+            pytest.param({"version": ""}, id="empty"),
+        ],
+    )
+    def test_no_version_is_left_to_py_pure_client(
+        self, client_factory, pure1_client, arguments
+    ):
+        """Without one the client talks the newest version py-pure-client knows."""
+        result = get_pure1(ansible_module(), **arguments)
+
+        client_factory.assert_called_once()
+        assert set(client_factory.call_args[1]) == {
+            "app_id",
+            "private_key_file",
+            "configuration",
+        }
+        assert result == pure1_client
+
+    @pytest.mark.parametrize(
+        "arguments, package",
+        [
+            pytest.param({"version": "1.6"}, SDK.__name__ + ".Pure1_1_6", id="1.6"),
+            pytest.param({"version": "1.0"}, SDK.__name__ + ".Pure1_1_0", id="1.0"),
+            pytest.param({}, NEWEST.__name__, id="not given"),
+        ],
+    )
+    def test_client_of_the_sdk_is_of_the_version(self, sdk_client, arguments, package):
+        """Through the factory of py-pure-client itself, with nothing sent."""
+        module = ansible_module()
+
+        client = get_pure1(module, **arguments)
+
+        module.fail_json.assert_not_called()
+        assert type(client).__module__ == package + ".client"
+        assert type(client).__name__ == "Client"
+
+    def test_version_py_pure_client_does_not_have_fails_the_task(self, sdk_client):
+        """py-pure-client refuses it when the client is created."""
+        module = ansible_module()
+
+        with pytest.raises(SystemExit):
+            get_pure1(module, version="9.9")
+
+        module.fail_json.assert_called_once()
+        msg = module.fail_json.call_args[1]["msg"]
+        # the rest is the wording of py-pure-client
+        assert msg.startswith("Failed to create the Pure1 client: ValueError: ")
+        assert "9.9" in msg
+
     @pytest.mark.parametrize(
         "credentials",
         [
