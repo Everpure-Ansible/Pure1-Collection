@@ -115,12 +115,14 @@ Per-release notes can be found on the
 - pure1_controllers - Collect array controllers information from Pure1
 - pure1_drives - Get array drives information from Pure1
 - pure1_file_systems - Collect file systems information from Pure1
+- pure1_fleets - Collect fleets and their members from Pure1
 - pure1_hardware - Collect the hardware components of arrays from Pure1
 - pure1_info - Collect information from Pure1
 - pure1_network_interfaces - Get array network interface details from Pure1 (deprecated, to be removed in version 2.0.0: use pure1_nics instead)
 - pure1_nics - Get network interface information from Pure1
 - pure1_pods - Get FlashArray pod information from Pure1
 - pure1_ports - Get port information from Pure1
+- pure1_topology_groups - Collect the topology groups of fleets from Pure1
 - pure1_volume_metrics - Get FlashArray volume metrics from Pure1
 - pure1_volumes - Get FlashArray volume information from Pure1
 
