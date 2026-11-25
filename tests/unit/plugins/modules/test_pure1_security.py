@@ -2038,8 +2038,9 @@ class TestDocumentation:
             pytest.param(
                 "RETURN",
                 "pure1_security.contains.arrays",
-                "what Pure1 reports for the other one is left out and the module "
-                "gives a warning.",
+                "Where two arrays carry one name, the array that is read first "
+                "keeps the name. What Pure1 reports for the other one is left "
+                "out, and the module gives a warning that counts it.",
                 id="two arrays of one name",
             ),
             pytest.param(
@@ -2092,9 +2093,13 @@ class TestDocumentation:
     def test_notes_name_the_release_of_py_pure_client(self):
         notes = " ".join(yaml.safe_load(pure1_security.DOCUMENTATION)["notes"])
 
-        assert "requires py-pure-client 1.91.0 or later" in notes
-        assert "C({0})".format(INSIGHTS) in notes
-        assert "C({0})".format(ANOMALIES) in notes
+        # what came with a release, not a requirement below that of the
+        # collection
+        assert notes.startswith(
+            "The Pure1 REST 1.5 calls this module makes, C({0}) and C({1}), came "
+            "with py-pure-client 1.91.0.".format(INSIGHTS, ANOMALIES)
+        )
+        assert "requires" not in notes
 
     def test_documentation_gives_the_choices_and_defaults_of_the_spec(self):
         options = yaml.safe_load(pure1_security.DOCUMENTATION)["options"]

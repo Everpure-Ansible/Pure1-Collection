@@ -41,7 +41,9 @@ from plugins.module_utils.pure1 import (
     pure1_argument_spec,
     pure1_attr,
     pure1_error_text,
+    pure1_is_one_of,
     pure1_items,
+    pure1_keeps_name,
     pure1_list,
     pure1_require,
     pure1_resolve_arrays,
@@ -734,8 +736,8 @@ class TestCertificateVerification:
         ]
         module.warn.assert_called_once_with(
             "validate_certs is false, but the installed py-pure-client cannot "
-            "switch the verification off: the certificate of Pure1 is still "
-            "verified. py-pure-client 1.71.0 and later can."
+            "switch the verification off, which py-pure-client 1.71.0 and later "
+            "can: the certificate of Pure1 is still verified."
         )
 
     @pytest.mark.parametrize("error", [ValueError, TypeError])
@@ -1261,6 +1263,58 @@ class TestPure1Items:
 
         assert pure1_items(ansible_module(), "get_pods", lambda: response) == pods
 
+    def test_page_with_more_items_than_its_total_is_returned_whole(self):
+        """The SDK iterator ends where its place in a page reaches the total."""
+        pods = [sdk_model("Pod", name=name) for name in ("pod-a", "pod-b", "pod-c")]
+        # what the SDK hands out of such a page
+        assert list(valid_response(pods, total_item_count=2).items) == pods[:2]
+
+        items = pure1_items(
+            ansible_module(),
+            "get_pods",
+            lambda: valid_response(pods, total_item_count=2),
+        )
+
+        assert items == pods
+
+    def test_later_page_with_more_items_than_the_total_is_returned_whole(self):
+        pods = [sdk_model("Pod", name="pod-{0}".format(number)) for number in range(4)]
+
+        def next_page(**kwargs):
+            return ApiResponse(200, {}, sdk_model("PodGetResponse", items=pods[1:]))
+
+        # the first page has one pod and a total of two
+        response = _paged_response(pods[:1], next_page)
+
+        assert pure1_items(ansible_module(), "get_pods", lambda: response) == pods
+
+    @pytest.mark.parametrize(
+        "total",
+        [
+            pytest.param(5, id="total above the limit"),
+            pytest.param(1, id="total below the limit"),
+            pytest.param(None, id="no total"),
+        ],
+    )
+    def test_limit_of_the_call_ends_a_page_that_pure1_sent_whole(self, total):
+        """get_arrays_tags sends every tag, whatever limit the call gives."""
+        tags = [sdk_model("Tag", key="key-{0}".format(number)) for number in range(5)]
+        page = ItemIterator(
+            None, {"limit": 2}, None, total, tags, None, more_items_remaining=False
+        )
+        response = ValidResponse(200, None, total, page, {})
+
+        items = pure1_items(ansible_module(), "get_arrays_tags", lambda: response)
+
+        assert items == tags[:2]
+
+    def test_items_that_are_no_sdk_iterator_are_read_as_they_are(self):
+        """Nothing is looked for in what is not the iterator of the SDK."""
+        pods = [sdk_model("Pod", name="pod-a"), sdk_model("Pod", name="pod-b")]
+        response = ValidResponse(200, None, 1, iter(pods), {})
+
+        assert pure1_items(ansible_module(), "get_pods", lambda: response) == pods
+
     @pytest.mark.parametrize(
         "response, expected",
         [
@@ -1612,7 +1666,7 @@ class TestFilterString:
         assert "arrays.name=" + filter_string("o'brien") == "arrays.name='o\\'brien'"
 
 
-TOO_LONG = "The request is too long for Pure1: give fewer names in one task."
+TOO_LONG = "The request is too long for Pure1: give fewer names or IDs in one task."
 # The helpers that run a request; each takes a request function
 REQUEST_HELPERS = [
     pytest.param(pure1_items, id="pure1_items"),
@@ -2290,6 +2344,93 @@ class TestPure1List:
         assert listing == Pure1Listing(items, 8, False)
         assert _paging(later) == [(None, 3, None), (None, 6, None)]
 
+    def test_page_with_more_items_than_its_total_is_returned_whole(self, pure1_client):
+        """The SDK iterator ends where its place in a page reaches the total."""
+        items, answers = _serve(pure1_client, count=3, total_item_count=2)
+        # what the SDK hands out of such a page
+        assert list(answers().items) == items[:2]
+        del answers.requests[:]
+
+        def request(**page):
+            return pure1_client.get_hardware(**page)
+
+        listing = pure1_list(ansible_module(), "get_hardware", request)
+
+        assert listing == Pure1Listing(items, 2, False)
+        assert _paging(answers) == [(None, None, None)]
+
+    @pytest.mark.parametrize(
+        "limit, returned, truncated",
+        [
+            pytest.param(1, 1, True, id="below the total"),
+            pytest.param(2, 2, False, id="the total"),
+            pytest.param(3, 3, False, id="the page"),
+            pytest.param(4, 3, False, id="above the page"),
+        ],
+    )
+    def test_limit_on_a_page_with_more_items_than_its_total(
+        self, pure1_client, limit, returned, truncated
+    ):
+        """Of what the page carries beyond its total at most the limit is returned."""
+        items, answers = _serve(pure1_client, count=3, total_item_count=2)
+
+        def request(**page):
+            return pure1_client.get_hardware(**page)
+
+        listing = pure1_list(ansible_module(), "get_hardware", request, limit=limit)
+
+        assert listing == Pure1Listing(items[:returned], 2, truncated)
+        assert _paging(answers) == [(limit, None, None)]
+
+    def test_sorted_page_with_more_items_than_its_total_is_returned_whole(
+        self, pure1_client
+    ):
+        """The total is reached with the first page, so no other page is asked for."""
+        items = _hardware(12)
+        answers = paged_answers(
+            "HardwareGetResponse", items, page_size=5, total_item_count=4
+        )
+        pure1_client.get_hardware.side_effect = answers
+
+        listing = pure1_list(
+            ansible_module(),
+            "get_hardware",
+            lambda **page: pure1_client.get_hardware(sort=["name", "id"], **page),
+        )
+
+        assert listing == Pure1Listing(items[:5], 4, False)
+        assert _paging(answers) == [(None, None, None)]
+
+    def test_page_of_a_token_after_the_total_is_reached_is_not_read(self, pure1_client):
+        """The SDK does not follow the token of a page that reached the total."""
+        items, answers = _serve(pure1_client, total_item_count=2)
+
+        def request(**page):
+            return pure1_client.get_hardware(**page)
+
+        listing = pure1_list(ansible_module(), "get_hardware", request)
+
+        assert listing == Pure1Listing(items[:3], 2, False)
+        assert _paging(answers) == [(None, None, None)]
+
+    @pytest.mark.parametrize("limit", [None, 4, 3])
+    def test_later_page_with_more_items_than_the_total_is_returned_whole(self, limit):
+        hardware = _hardware(4)
+
+        def next_page(**kwargs):
+            return ApiResponse(
+                200, {}, sdk_model("HardwareGetResponse", items=hardware[1:])
+            )
+
+        # the first page has one item and a total of two
+        response = _paged_response(hardware[:1], next_page)
+
+        listing = pure1_list(
+            ansible_module(), "get_hardware", lambda **page: response, limit=limit
+        )
+
+        assert listing == Pure1Listing(hardware[:limit], 2, False)
+
     def test_error_answer_fails_the_task(self, pure1_client):
         pure1_client.get_hardware.return_value = error_response(
             400, "Illegal filter format", "Unexpected input at character 9"
@@ -2928,6 +3069,7 @@ class TestPure1Time:
             pytest.param(1612357445999, "2021-02-03 13:04:05 UTC", id="milliseconds"),
             pytest.param(0, "1970-01-01 00:00:00 UTC", id="0 is a time"),
             pytest.param(None, None, id="None"),
+            pytest.param(1612357445000.5, "2021-02-03 13:04:05 UTC", id="float"),
         ],
     )
     def test_time(self, milliseconds, expected):
@@ -2938,6 +3080,41 @@ class TestPure1Time:
         # the host is five hours behind UTC
         assert time.localtime(1612357445)[3] == 8
         assert pure1_time(1612357445000) == "2021-02-03 13:04:05 UTC"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param(True, id="True"),
+            pytest.param(False, id="False"),
+            pytest.param("1612357445000", id="number as text"),
+            pytest.param("soon", id="text"),
+            pytest.param(b"1612357445000", id="bytes"),
+            pytest.param([1612357445000], id="list"),
+            pytest.param({"time": 1612357445000}, id="dictionary"),
+            pytest.param(float("nan"), id="not a number"),
+            pytest.param(float("inf"), id="infinity"),
+            pytest.param(10**20, id="year beyond the platform"),
+            pytest.param(-(10**20), id="year before the platform"),
+            pytest.param(10**400, id="beyond a float"),
+        ],
+    )
+    def test_value_that_cannot_be_a_time_is_none(self, value):
+        """A result has null for it: no value of Pure1 fails the task here."""
+        assert pure1_time(value) is None
+
+    def test_time_that_the_platform_refuses_is_none(self, monkeypatch):
+        """Some platforms convert no time before 1970."""
+
+        def refused(seconds):
+            raise OSError(22, "Invalid argument")
+
+        monkeypatch.setattr(
+            pure1_utils,
+            "time",
+            types.SimpleNamespace(gmtime=refused, strftime=time.strftime),
+        )
+
+        assert pure1_time(-1000) is None
 
 
 class TestPure1Attr:
@@ -3143,6 +3320,23 @@ class TestPure1ResolveArrays:
         assert [array["name"] for array in arrays] == names
         assert len(answers.requests) == 3
 
+    def test_array_of_a_page_with_more_arrays_than_its_total_is_found(
+        self, pure1_client
+    ):
+        """An array that the page carries is known, whatever Pure1 counted."""
+        pure1_client.get_arrays.return_value = valid_response(
+            [_array("array1", id="1"), _array("array2", id="2")], total_item_count=1
+        )
+        module = ansible_module()
+
+        arrays = pure1_resolve_arrays(module, pure1_client, ["array1", "array2"])
+
+        assert [(array["name"], array["id"]) for array in arrays] == [
+            ("array1", "1"),
+            ("array2", "2"),
+        ]
+        module.fail_json.assert_not_called()
+
     @pytest.mark.parametrize(
         "names, expected",
         [
@@ -3236,6 +3430,133 @@ class TestPure1ResolveArrays:
         module.fail_json.assert_called_once_with(
             msg="Pure1 request get_arrays failed: PureError: no route to Pure1"
         )
+
+
+def _resolved(name, array_id):
+    """Return an array as pure1_resolve_arrays returns it."""
+    return dict(id=array_id, name=name, fqdn=None, os=None, model=None, version=None)
+
+
+def _array_reference(**fields):
+    """Return the reference a row has to its array."""
+    return sdk_model("FixedReferenceFqdn", **fields)
+
+
+class TestPure1IsOneOf:
+    """pure1_is_one_of tells whether a row is of one of the arrays of the task."""
+
+    ARRAYS = [_resolved("array1", "id-1"), _resolved("array2", "id-2")]
+
+    @pytest.mark.parametrize(
+        "reference, expected",
+        [
+            pytest.param(dict(id="id-1", name="array1"), True, id="the first"),
+            pytest.param(dict(id="id-2", name="array2"), True, id="the second"),
+            pytest.param(dict(id="id-2"), True, id="id alone"),
+            pytest.param(dict(id="id-2", name="other"), True, id="id under a name"),
+            pytest.param(dict(id="id-3", name="array1"), False, id="same name"),
+            pytest.param(dict(id="id-3", name="ARRAY1"), False, id="other case"),
+            pytest.param(dict(id="id-3", name="array3"), False, id="another array"),
+            pytest.param(dict(name="array2"), True, id="name alone"),
+            pytest.param(dict(name="ARRAY2"), False, id="name alone in other case"),
+            pytest.param(dict(name="array3"), False, id="other name alone"),
+            pytest.param(dict(fqdn="array1.example.com"), False, id="no id, no name"),
+            pytest.param(dict(), False, id="no field set"),
+        ],
+    )
+    def test_reference_is_told_by_its_id(self, reference, expected):
+        """Pure1 compares names whatever their case: the id tells the arrays apart."""
+        found = pure1_is_one_of(self.ARRAYS, _array_reference(**reference))
+
+        assert found is expected
+
+    def test_reference_that_pure1_left_out(self):
+        """An entry of a list can be null, and a row can have no reference."""
+        assert pure1_is_one_of(self.ARRAYS, None) is False
+
+    @pytest.mark.parametrize(
+        "reference, expected",
+        [
+            pytest.param(dict(id="id-9", name="array1"), True, id="name"),
+            pytest.param(dict(name="array1"), True, id="name alone"),
+            pytest.param(dict(id="id-9", name="Array1"), False, id="other case"),
+            pytest.param(dict(id="id-9"), False, id="id alone"),
+            pytest.param(dict(id="id-2", name="array1"), True, id="id of the other"),
+        ],
+    )
+    def test_array_without_an_id_is_told_by_its_name(self, reference, expected):
+        """As Pure1 spells it: the name of the record is the spelling of Pure1."""
+        arrays = [_resolved("array1", None), _resolved("array2", "id-2")]
+
+        assert pure1_is_one_of(arrays, _array_reference(**reference)) is expected
+
+    def test_no_arrays_have_no_row(self):
+        assert pure1_is_one_of([], _array_reference(id="id-1", name="array1")) is False
+
+    def test_arrays_are_those_pure1_resolve_arrays_returned(self, pure1_client):
+        """Of two arrays whose names differ in case only the one named is kept."""
+        named = _array("array1", id="id-1")
+        other = _array("Array1", id="id-2")
+        pure1_client.get_arrays.return_value = valid_response([other, named])
+
+        arrays = pure1_resolve_arrays(ansible_module(), pure1_client, ["array1"])
+
+        assert pure1_is_one_of(arrays, _array_reference(id="id-1", name="array1"))
+        assert not pure1_is_one_of(arrays, _array_reference(id="id-2", name="Array1"))
+
+
+class TestPure1KeepsName:
+    """pure1_keeps_name tells the array that has its name in a result keyed by name."""
+
+    def test_array_seen_first_keeps_the_name(self):
+        owners = {}
+
+        assert pure1_keeps_name(owners, "array1", "id-1") is True
+        assert pure1_keeps_name(owners, "array1", "id-2") is False
+        assert pure1_keeps_name(owners, "array1", "id-1") is True
+        assert owners == {"array1": "id-1"}
+
+    def test_each_name_has_its_own_array(self):
+        owners = {}
+
+        assert pure1_keeps_name(owners, "array1", "id-1") is True
+        assert pure1_keeps_name(owners, "array2", "id-2") is True
+        assert pure1_keeps_name(owners, "Array1", "id-3") is True
+        assert pure1_keeps_name(owners, "array2", "id-1") is False
+        assert owners == {"array1": "id-1", "array2": "id-2", "Array1": "id-3"}
+
+    def test_row_without_an_id_is_of_the_array_that_has_the_name(self):
+        owners = {}
+
+        assert pure1_keeps_name(owners, "array1", "id-1") is True
+        assert pure1_keeps_name(owners, "array1", None) is True
+        assert owners == {"array1": "id-1"}
+
+    def test_first_array_with_an_id_takes_a_name_seen_without_one(self):
+        owners = {}
+
+        assert pure1_keeps_name(owners, "array1", None) is True
+        assert owners == {"array1": None}
+        assert pure1_keeps_name(owners, "array1", "id-2") is True
+        assert pure1_keeps_name(owners, "array1", "id-1") is False
+        assert pure1_keeps_name(owners, "array1", None) is True
+        assert owners == {"array1": "id-2"}
+
+    def test_rows_of_two_arrays_of_one_name_are_not_merged(self):
+        """As a module uses it: the rows of the second array are counted, not filed."""
+        rows = [("array1", "id-1"), ("array1", "id-2"), ("array2", "id-3")]
+        rows += [("array1", "id-1"), ("array1", "id-2")]
+        owners = {}
+        kept = []
+        left_out = 0
+        for name, array_id in rows:
+            if pure1_keeps_name(owners, name, array_id):
+                kept.append((name, array_id))
+            else:
+                left_out += 1
+
+        assert kept == [("array1", "id-1"), ("array2", "id-3"), ("array1", "id-1")]
+        assert left_out == 2
 
 
 class TestPure1Require:

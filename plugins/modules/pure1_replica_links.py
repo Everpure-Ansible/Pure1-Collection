@@ -28,9 +28,6 @@ description:
   - The module is a report and a coarse check. It is not a recovery point
     objective gate, for which the arrays themselves are the authority, and
     it derives no healthy or unhealthy verdict of its own.
-  - It makes one request for each link type, one for the replication
-    targets, one for the policies of the file-system links when the result
-    holds a file-system link, and one for I(array).
 options:
   link_type:
     description:
@@ -53,7 +50,7 @@ options:
         targets of every array are collected.
       - The names are matched without regard to case, and the result carries
         the names as Pure1 spells them.
-      - The task fails for a name that Pure1 does not know.
+      - A name that Pure1 does not know fails the task.
       - Only the arrays that the names stand for are selected, which are
         told from every other array by their ID in Pure1. Another array
         whose name differs from one of them in case only is not selected.
@@ -93,6 +90,13 @@ options:
       - Collect the object replication targets of FlashBlades as well.
     type: bool
     default: true
+notes:
+  - The module makes one request for each link type, one for the replication
+    targets, one for the policies of the file-system links when the result
+    holds a file-system link, and one for I(array).
+seealso:
+  - module: everpure.pure1.pure1_pgroup_snapshots
+  - module: everpure.pure1.pure1_pods
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -153,7 +157,7 @@ EXAMPLES = r"""
 
 RETURN = r"""
 pure1_replica_links:
-  description: The replica links and the replication targets collected from Pure1
+  description: The replica links and the replication targets collected from Pure1.
   returned: always
   type: dict
   contains:
@@ -247,7 +251,8 @@ pure1_replica_links:
         recovery_point:
           description:
             - The time of the last replicated data, which is what the target
-              pod holds when it is promoted, as C(YYYY-MM-DD HH:MM:SS UTC).
+              pod holds when it is promoted, in UTC, as
+              C(YYYY-MM-DD HH:MM:SS UTC).
             - Null when Pure1 has no recovery point for the link.
           type: str
         recovery_point_epoch:
@@ -262,7 +267,7 @@ pure1_replica_links:
             - Such a link is left out of the maximum values of the summary.
           type: bool
         as_of:
-          description: The time at which Pure1 last refreshed the link, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: The time at which Pure1 last refreshed the link, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
           description: The same in milliseconds since the epoch.
@@ -365,7 +370,7 @@ pure1_replica_links:
         recovery_point:
           description:
             - The time at which the last replicated snapshot was created,
-              as C(YYYY-MM-DD HH:MM:SS UTC).
+              in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
             - Null when Pure1 has no recovery point for the link.
           type: str
         recovery_point_epoch:
@@ -379,7 +384,7 @@ pure1_replica_links:
             - Such a link is left out of the maximum values of the summary.
           type: bool
         as_of:
-          description: The time at which Pure1 last refreshed the link, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: The time at which Pure1 last refreshed the link, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
           description: The same in milliseconds since the epoch.
@@ -484,7 +489,7 @@ pure1_replica_links:
           type: int
         recovery_point:
           description:
-            - The time of the last replicated data, as
+            - The time of the last replicated data, in UTC, as
               C(YYYY-MM-DD HH:MM:SS UTC). It has been seen about an hour
               behind C(as_of) on links whose C(lag) was a minute or two.
             - Null when Pure1 has no recovery point for the link.
@@ -500,7 +505,7 @@ pure1_replica_links:
             - Such a link is left out of the maximum values of the summary.
           type: bool
         as_of:
-          description: The time at which Pure1 last refreshed the link, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: The time at which Pure1 last refreshed the link, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
           description: The same in milliseconds since the epoch.
@@ -519,7 +524,7 @@ pure1_replica_links:
         - A key is null when Pure1 reports no value for it.
         - Empty when Pure1 has none and when I(replication_targets) is
           false.
-        - Where two arrays have one name, the array that Pure1 lists first
+        - Where two arrays carry one name, the array that Pure1 lists first
           keeps the name. The targets of the other one are left out, and
           the module gives a warning that counts them.
       type: dict
@@ -540,7 +545,7 @@ pure1_replica_links:
           description: What Pure1 reports about a connection that is in trouble.
           type: str
         as_of:
-          description: The time at which Pure1 last refreshed the target, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: The time at which Pure1 last refreshed the target, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
           description: The same in milliseconds since the epoch.
@@ -706,11 +711,11 @@ pure1_replica_links:
         paused: false
         lag: 3964000
         lag_seconds: 3964
-        recovery_point: 2021-02-03 11:58:01 UTC
-        recovery_point_epoch: 1612353481000
+        recovery_point: 2021-02-03 11:35:43 UTC
+        recovery_point_epoch: 1612352143000
         never_replicated: false
-        as_of: 2021-02-03 13:04:05 UTC
-        as_of_epoch: 1612357445000
+        as_of: 2021-02-03 12:41:47 UTC
+        as_of_epoch: 1612356107000
         as_of_age_seconds: 1365
         policies:
           - policy1
@@ -764,6 +769,8 @@ from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     get_pure1,
     pure1_argument_spec,
     pure1_attr,
+    pure1_is_one_of,
+    pure1_keeps_name,
     pure1_list,
     pure1_resolve_arrays,
     pure1_time,
@@ -846,39 +853,6 @@ def member_arrays(member):
     return arrays
 
 
-def is_one_of(arrays, reference):
-    """Tell whether a reference to an array is to one of the arrays of the task
-
-    arrays are the arrays as pure1_resolve_arrays() returns them. The id
-    tells an array from another one of the same name, or of that name in
-    another case. Where Pure1 sent no id, the name must be the same as
-    Pure1 spells it.
-    """
-    reference_id = pure1_attr(reference, "id")
-    name = pure1_attr(reference, "name")
-    for array in arrays:
-        if reference_id is not None and array["id"] is not None:
-            if reference_id == array["id"]:
-                return True
-        elif name is not None and name == array["name"]:
-            return True
-    return False
-
-
-def keeps_name(owners, name, array_id):
-    """Tell whether an array is the one that has its name in the result
-
-    A result that is keyed by array name has one array under a name: the
-    array that is seen first keeps it, and owners holds its id by the name.
-    Arrays are told apart by their ids, so a reference without an id is
-    taken for the array that has the name.
-    """
-    owner = owners.setdefault(name, array_id)
-    if owner is None:
-        owners[name] = array_id
-    return owner is None or array_id is None or owner == array_id
-
-
 def link_members(link, role):
     """Return the sources, the targets or the members of a link"""
     return [
@@ -895,7 +869,7 @@ def link_members(link, role):
 def on_arrays(link, role, arrays):
     """Tell whether a member on that side of a link is on one of the arrays"""
     return any(
-        is_one_of(arrays, location)
+        pure1_is_one_of(arrays, location)
         for field in ROLE_MEMBERS[role]
         for member in pure1_attr(link, field, [])
         for location in member_locations(member)
@@ -1038,8 +1012,8 @@ def generate_targets_dict(module, pure_1, arrays):
     summary = {"total": 0, "not_connected": []}
     if not module.params["replication_targets"]:
         return targets_info, summary
-    # Pure1 compares the names whatever their case: is_one_of() keeps the
-    # targets of the arrays themselves
+    # Pure1 compares the names whatever their case: pure1_is_one_of() keeps
+    # the targets of the arrays themselves
     target_filter = filter_in("arrays.name", [array["name"] for array in arrays or []])
     targets = list_all(
         module,
@@ -1064,11 +1038,11 @@ def generate_targets_dict(module, pure_1, arrays):
         on = []
         others = set()
         for reference in references:
-            if arrays is not None and not is_one_of(arrays, reference):
+            if arrays is not None and not pure1_is_one_of(arrays, reference):
                 continue
             array = pure1_attr(reference, "name")
             array_id = pure1_attr(reference, "id")
-            if not keeps_name(owners, array, array_id):
+            if not pure1_keeps_name(owners, array, array_id):
                 others.add((array, array_id))
             elif array not in on:
                 on.append(array)

@@ -154,11 +154,11 @@ def _left_out(module, what, count):
         module.warn("{0} are left out of the result: {1}.".format(what, count))
 
 
-def pure1_security_insights(module, pure_1, arrays=None, types=None, keep_named=False):
+def pure1_security_insights(module, pure_1, arrays=None, types=None):
     """Return the security insights of the arrays, by array and by CVE id
 
     One listing of get_assessment_security_insights_arrays through
-    pure1_list(), unsorted, whatever is asked for. The method needs
+    pure1_list(), unsorted, whatever is asked for. The method came with
     py-pure-client 1.91.0: the module checks for it with pure1_require()
     before its first request. A failed request fails the task with the line
     of the shared helpers.
@@ -188,12 +188,10 @@ def pure1_security_insights(module, pure_1, arrays=None, types=None, keep_named=
     order of the names, with the name as Pure1 spells it. An array is a key
     when at least one of its insights is returned: neither an array without
     insights nor, with types, one that has insights of other types only.
-    With keep_named True every array of arrays is a key, one without a
-    returned insight with empty lists and the id and the fqdn of its
-    record. id and fqdn are otherwise those of the array references of the
-    insights, and what the references lack is taken from the record of the
-    array where arrays are given. Each is None where Pure1 sent none: an
-    array without a fully qualified domain name has fqdn None.
+    id and fqdn are those of the array references of the insights, and what
+    the references lack is taken from the record of the array where arrays
+    are given. Each is None where Pure1 sent none: an array without a fully
+    qualified domain name has fqdn None.
     insight_types are the types of the returned insights of the array,
     each once, in order. insights: [{type,
     as_of, as_of_epoch}] in the order of type and time; as_of is the time
@@ -295,10 +293,6 @@ def pure1_security_insights(module, pure_1, arrays=None, types=None, keep_named=
             dict(type=kind, as_of=pure1_time(as_of), as_of_epoch=as_of)
         )
         unread += _add_cves(entry["cves"], kind, pure1_attr(insight, "additional_data"))
-    if keep_named:
-        for array in arrays or []:
-            if array["name"] not in entries:
-                entries[array["name"]] = _entry(array["id"], array["fqdn"])
 
     found = {}
     for name in sorted(entries):

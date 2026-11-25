@@ -7,11 +7,21 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
+import time
 from unittest.mock import call
 
 import pytest
 import yaml
+from ansible.template import Templar
 from pypureclient import ErrorResponse, PureError
+
+try:
+    from ansible.template import trust_as_template
+except ImportError:
+    # ansible-core before 2.19 templates every string
+    def trust_as_template(value):
+        return value
+
 
 from plugins.modules import pure1_controllers
 from plugins.modules.pure1_controllers import version_key
@@ -451,6 +461,50 @@ class TestArrayOption:
             "arrays": {"array1": _rollup()},
         }
 
+    def test_named_array_is_told_from_another_array_by_its_id(self, pure1_client):
+        """The task names one array: the controllers of another array that
+        carries its name are not asked for, also when they come first"""
+        other = [array_reference("array1", id="other-id", fqdn="other.example.com")]
+        failed = dict(arrays=other, status="not ready")
+        pure1_client.get_arrays.side_effect = _known("array1")
+        pure1_client.get_controllers.return_value = valid_response(
+            _pair(ct0=failed, ct1=failed) + _pair()
+        )
+
+        module = run_main(pure1_controllers, array=["array1"])
+
+        pure1_client.get_controllers.assert_called_once_with(
+            filter="arrays.name='array1'"
+        )
+        module.warn.assert_not_called()
+        module.exit_json.assert_called_once_with(
+            changed=False,
+            pure1_controllers={
+                "controllers": {"array1": PAIR_ROWS},
+                "arrays": {"array1": _rollup()},
+            },
+        )
+
+    def test_controller_without_the_id_of_its_array_is_kept_by_name(self, pure1_client):
+        """Without an ID to compare, the name as Pure1 spells it decides"""
+        bare = [array_reference("array1")]
+        pure1_client.get_arrays.side_effect = _known("array1")
+        pure1_client.get_controllers.return_value = valid_response(
+            _pair(ct0=dict(arrays=bare), ct1=dict(arrays=bare))
+            + _pair(
+                ct0=dict(arrays=[array_reference("ARRAY1")]),
+                ct1=dict(arrays=[array_reference("ARRAY1")]),
+            )
+        )
+
+        module = run_main(pure1_controllers, array=["array1"])
+
+        module.warn.assert_not_called()
+        assert _result(module) == {
+            "controllers": {"array1": PAIR_ROWS},
+            "arrays": {"array1": _rollup(id=None, fqdn=None)},
+        }
+
 
 class TestRows:
     """Tests of what is filed and of the defaults for what Pure1 did not send"""
@@ -542,7 +596,7 @@ class TestRows:
 
         assert _warnings(module) == [
             "Controllers that Pure1 returned without a name or without an array "
-            "are left out of the result: 1"
+            "are left out of the result: 1."
         ]
         assert _result(module) == {
             "controllers": {"array1": PAIR_ROWS},
@@ -560,7 +614,7 @@ class TestRows:
         # and the named array has no controller left
         assert _warnings(module) == [
             "Controllers that Pure1 returned without a name or without an array "
-            "are left out of the result: 3",
+            "are left out of the result: 3.",
             "Pure1 reports no controller for array array1: it is not in the result.",
         ]
         assert _result(module) == {"controllers": {}, "arrays": {}}
@@ -623,7 +677,7 @@ class TestRows:
 
         assert _warnings(module) == [
             "Controllers that Pure1 returned under the name of another controller "
-            "of the same array are left out of the result: 2"
+            "of the same array are left out of the result: 2."
         ]
         assert _result(module) == {
             "controllers": {"array1": PAIR_ROWS, "array2": {"CT0": _row()}},
@@ -648,7 +702,7 @@ class TestRows:
 
         assert _warnings(module) == [
             "Controllers that Pure1 returned under the name of another controller "
-            "of the same array are left out of the result: 1"
+            "of the same array are left out of the result: 1."
         ]
         assert _result(module) == {
             "controllers": {"array1": PAIR_ROWS},
@@ -661,7 +715,7 @@ class TestArraysOfOneName:
 
     WARNING = (
         "Arrays that Pure1 returned under the name of another array are left "
-        "out of the result: {0}"
+        "out of the result: {0}."
     )
 
     @staticmethod
@@ -793,7 +847,7 @@ class TestArraysOfOneName:
 
         assert _warnings(module) == [
             "Controllers that Pure1 returned under the name of another controller "
-            "of the same array are left out of the result: 1",
+            "of the same array are left out of the result: 1.",
             self.WARNING.format(1),
         ]
         assert _result(module) == {
@@ -1074,8 +1128,8 @@ class TestIncompleteListing:
             call(filter=None, offset=2),
         ]
         assert _warnings(module) == [
-            "Pure1 returned 2 controllers and did not say whether there are "
-            "more: the result may be incomplete."
+            "Pure1 returned 2 of an unknown number of controllers: the result "
+            "may be incomplete."
         ]
         assert list(_result(module)["controllers"]) == ["array1"]
 
@@ -1219,3 +1273,164 @@ class TestDocumentation:
         module.exit_json.assert_called_once_with(
             changed=False, pure1_controllers=sample
         )
+
+
+MODULE = "everpure.pure1.pure1_controllers"
+NOT_REDUNDANT = (
+    "An array has no redundant pair of ready controllers, or its data is more "
+    "than ten minutes old"
+)
+
+
+def _template(text, variables):
+    """Return what ansible-core makes of a template of a task"""
+    templar = Templar(loader=None, variables=variables)
+    return templar.template(trust_as_template(text))
+
+
+def _play_examples(client, **served):
+    """Run the tasks of EXAMPLES in their order and return what they make
+
+    A task of the module runs through main() with the options of the example
+    and registers its result. Pure1 knows the arrays that the task names and
+    answers with the controllers that served gives under the name the task
+    registers. Every other task is returned under the name that the task of
+    the module before it registered, as a list with one entry for each item
+    of its loop, one without a loop: its when, and unless that is false the
+    templates of its arguments, as ansible-core evaluates them. The
+    conditions of an assert end with the first that is false: ansible-core
+    does not evaluate those after it.
+    """
+    registered = {}
+    made = {}
+    reads = None
+    for task in yaml.safe_load(pure1_controllers.EXAMPLES):
+        options = task.get(MODULE)
+        if options is not None:
+            options = {
+                name: value
+                for name, value in options.items()
+                if name not in ("app_id", "key_file")
+            }
+            reads = task["register"]
+            if "array" in options:
+                client.get_arrays.side_effect = _known(*options["array"])
+            else:
+                # The check that get_pure1 makes
+                client.get_arrays.side_effect = [valid_response()]
+            client.get_controllers.return_value = valid_response(served[reads])
+            module = run_main(pure1_controllers, **options)
+            registered[reads] = dict(module.exit_json.call_args[1])
+            made[reads] = []
+            continue
+        (action,) = set(task) - {"name", "when", "loop", "vars"}
+        variables = dict(registered)
+        items = _template(task["loop"], variables) if "loop" in task else [None]
+        entries = []
+        for item in items:
+            scope = dict(variables, item=item)
+            entry = {}
+            if "when" in task:
+                entry["when"] = _template("{{ " + task["when"] + " }}", scope)
+            if entry.get("when", True):
+                for key, value in task[action].items():
+                    if key == "that":
+                        entry[key] = []
+                        for each in value:
+                            holds = _template("{{ " + each + " }}", scope)
+                            entry[key].append(holds)
+                            if not holds:
+                                break
+                    elif isinstance(value, str):
+                        entry[key] = _template(value, scope)
+            entries.append(entry)
+        made[reads].append(entries)
+    return made
+
+
+def _fresh_pairs(**changes):
+    """Return the controllers of array1 and array2, refreshed a minute ago
+
+    changes are those of the second controller of array2.
+    """
+    fresh = dict(as_of=int(time.time() * 1000) - 60000)
+    return _pair(ct0=fresh, ct1=fresh) + _pair(
+        ct0=fresh, ct1=dict(fresh, **changes), array="array2"
+    )
+
+
+class TestExamples:
+    """The tasks of EXAMPLES, on what the module returns"""
+
+    @pytest.mark.usefixtures("host_west_of_utc")
+    def test_examples_read_what_the_module_returns(self, pure1_client):
+        everything = (
+            _pair()
+            + _pair(ct1=dict(status="not ready"), array="array2")
+            + [_controller("array3")]
+        )
+
+        made = _play_examples(pure1_client, controllers=everything, pair=_fresh_pairs())
+
+        assert list(made) == ["controllers", "pair"]
+        shown, not_redundant = made["controllers"]
+        assert shown == [
+            {
+                "msg": {
+                    "array1": PAIR_ROWS,
+                    "array2": {
+                        "CT0": _row(),
+                        "CT1": _row(id="ct1-id", mode="secondary", status="not ready"),
+                    },
+                    "array3": {"CT0": _row()},
+                }
+            }
+        ]
+        assert not_redundant == [
+            {"when": False},
+            {"when": True, "msg": "array2 primary CT0 secondary CT1"},
+            {"when": True, "msg": "array3 primary CT0 secondary none"},
+        ]
+        # Both arrays are there, both are redundant and their data is fresh
+        assert made["pair"] == [
+            [{"that": [True, True, True], "fail_msg": NOT_REDUNDANT}]
+        ]
+
+    def test_examples_when_pure1_has_no_controller(self, pure1_client):
+        """What the examples name is not there: no task fails to evaluate"""
+        made = _play_examples(pure1_client, controllers=[], pair=[])
+
+        assert made["controllers"] == [[{"msg": {}}], []]
+        # The first condition is false: the assert ends there
+        assert made["pair"] == [[{"that": [False], "fail_msg": NOT_REDUNDANT}]]
+
+    @pytest.mark.parametrize(
+        "changes, expected",
+        [
+            pytest.param(
+                dict(status="not ready"), [True, False], id="controller not ready"
+            ),
+            pytest.param(
+                dict(as_of=int(time.time() * 1000) - 3600000),
+                [True, True, False],
+                id="data of an hour ago",
+            ),
+        ],
+    )
+    def test_check_before_an_upgrade_fails(self, pure1_client, changes, expected):
+        made = _play_examples(
+            pure1_client, controllers=[], pair=_fresh_pairs(**changes)
+        )
+
+        assert made["pair"] == [[{"that": expected, "fail_msg": NOT_REDUNDANT}]]
+
+    def test_check_before_an_upgrade_fails_for_data_without_a_time(self, pure1_client):
+        """A time that is null counts as the oldest there is"""
+        timeless = dict(as_of=None)
+        rows = _pair(ct0=timeless, ct1=timeless) + _fresh_pairs()[2:]
+
+        made = _play_examples(pure1_client, controllers=[], pair=rows)
+
+        assert made["pair"] == [
+            [{"that": [True, True, False], "fail_msg": NOT_REDUNDANT}]
+        ]

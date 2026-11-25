@@ -523,7 +523,7 @@ class TestPure1FleetsMain:
     def test_empty_list_beside_the_other_option_is_refused_as_well(
         self, pure1_client, params
     ):
-        """Alone an empty list selects nothing; the exclusion sees it as given."""
+        """Alone an empty list counts as not set; the exclusion sees it as given."""
         _serve_lab(pure1_client)
 
         module = run_main(pure1_fleets, **params)
@@ -1669,13 +1669,20 @@ class TestDocumentation:
     def _documentation():
         return yaml.safe_load(pure1_fleets.DOCUMENTATION)
 
-    def test_every_required_method_is_in_a_note_with_its_release(self):
+    def test_every_required_method_is_in_the_note_that_names_no_release(self):
+        """The collection requires the py-pure-client that has them all: a
+        note with a release would read as a requirement of its own."""
         notes = self._documentation()["notes"]
 
-        for method, minimum in pure1_fleets.REQUIRED_METHODS:
+        assert notes[0] == (
+            "This module makes the Pure1 REST 1.6 call C(get_fleets) and the "
+            "Pure1 REST 1.7 calls C(get_fleets_members), C(get_topology_groups) "
+            "and C(get_topology_groups_members)."
+        )
+        for method, _minimum in pure1_fleets.REQUIRED_METHODS:
             named = [note for note in notes if "C({0})".format(method) in note]
-            assert len(named) == 1, method
-            assert "py-pure-client {0}".format(minimum) in named[0], method
+            assert named == [notes[0]], method
+        assert "py-pure-client" not in " ".join(notes)
 
     def test_listing_longer_than_a_page_costs_another_request_as_a_note_says(
         self, pure1_client
@@ -1701,7 +1708,7 @@ class TestDocumentation:
     def test_option_says_what_an_empty_list_does(self, option):
         text = " ".join(self._documentation()["options"][option]["description"])
 
-        assert "An empty list selects nothing, and every fleet is reported" in text
+        assert "An empty list counts as not set, and every fleet is reported" in text
 
     @pytest.mark.parametrize("option", ["name", "array"])
     def test_option_says_that_an_empty_list_still_excludes_the_other(self, option):

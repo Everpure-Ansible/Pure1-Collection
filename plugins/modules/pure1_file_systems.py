@@ -21,8 +21,9 @@ description:
     of the FlashBlade file systems and the Pure1 ID of every object. Pure1
     has no protocol or export data for a FlashArray file system or its
     managed directories, so the module cannot tell what a FlashArray exports.
-  - Pure1 holds what each array last reported, so the data is not live.
-    C(as_of) of each file system is the time of its data.
+  - Pure1 holds what each array last reported, which is usually less than an
+    hour old, so the data is not live. C(as_of) of each file system is the
+    time of its data.
 options:
   array:
     description:
@@ -30,7 +31,7 @@ options:
         of all arrays are returned when it is not set or empty.
       - A name is matched without regard to case, and the result has the
         name as Pure1 spells it.
-      - The task fails when Pure1 does not know one of the names.
+      - A name that Pure1 does not know fails the task.
     type: list
     elements: str
   name:
@@ -66,6 +67,8 @@ notes:
   - The module makes one request to Pure1 for every 1,000 file systems, one
     more when I(array) is set, and with I(directories) one more for every
     1,000 managed directories unless no file system is returned.
+seealso:
+  - module: everpure.pure1.pure1_metrics
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -132,7 +135,7 @@ EXAMPLES = r"""
 
 RETURN = r"""
 pure1_file_systems:
-  description: Returns the file systems information collected from Pure1
+  description: The file systems collected from Pure1.
   returned: always
   type: dict
   contains:
@@ -155,13 +158,16 @@ pure1_file_systems:
         - Pure1 can list two file systems of one array under the same name.
           The one created last is then the value for the name, and the
           others are in its C(same_name).
+        - Where two arrays carry one name, the array that Pure1 returns
+          first keeps the name. The file systems of the other one are left
+          out, and the module gives a warning that counts them.
       type: dict
       contains:
         id:
           description: The globally unique Pure1 ID of the file system.
           type: str
         created:
-          description: Time the file system was created, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: Time the file system was created, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         created_epoch:
           description: Time the file system was created, in milliseconds since the epoch.
@@ -170,7 +176,7 @@ pure1_file_systems:
           description: Whether the file system is destroyed and waits to be eradicated.
           type: bool
         as_of:
-          description: Time of the data Pure1 holds for the file system, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: Time of the data Pure1 holds for the file system, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
           description: Time of the data Pure1 holds for the file system, in milliseconds since the epoch.
@@ -234,7 +240,7 @@ pure1_file_systems:
               description: Absolute path of the managed directory in the file system.
               type: str
             created:
-              description: Time the managed directory was created, as C(YYYY-MM-DD HH:MM:SS UTC).
+              description: Time the managed directory was created, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
               type: str
             created_epoch:
               description: Time the managed directory was created, in milliseconds since the epoch.
@@ -310,6 +316,8 @@ from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     get_pure1,
     pure1_argument_spec,
     pure1_attr,
+    pure1_is_one_of,
+    pure1_keeps_name,
     pure1_list,
     pure1_resolve_arrays,
     pure1_time,
@@ -366,16 +374,35 @@ def directory_row(directory):
     }
 
 
-def array_names(item, selected):
-    """Return the names of the arrays an item is on, those of the task if it names any"""
+def array_names(item, arrays, owners):
+    """Return the names of the arrays to file an item under, each once
+
+    arrays are the arrays of the task as pure1_resolve_arrays() returns
+    them, or None. Pure1 matches the name of an array without regard to
+    case, and an item can be on more arrays than the task names: an array
+    that is not one of them is passed over. Of two arrays that carry one
+    name the one seen first keeps it, which owners tells. The second value
+    is whether the item is on an array that does not keep its name. The
+    names are None for an item that names no array at all.
+    """
+    references = [
+        reference
+        for reference in pure1_attr(item, "arrays", [])
+        if pure1_attr(reference, "name") is not None
+    ]
+    if not references:
+        return None, False
     names = []
-    for array in pure1_attr(item, "arrays", []):
-        name = pure1_attr(array, "name")
-        if name is None or name in names:
+    other_array = False
+    for reference in references:
+        name = pure1_attr(reference, "name")
+        if arrays is not None and not pure1_is_one_of(arrays, reference):
             continue
-        if selected is None or name.lower() in selected:
+        if not pure1_keeps_name(owners, name, pure1_attr(reference, "id")):
+            other_array = True
+        elif name not in names:
             names.append(name)
-    return names
+    return names, other_array
 
 
 def created_last(row):
@@ -421,16 +448,13 @@ def add_directories(module, pure_1, array_filter, rows, listed):
         )
     if left_out:
         module.warn(
-            "Pure1 returned {0} managed directories whose file system it did "
-            "not return: they are left out of the result.".format(left_out)
+            "Managed directories whose file system Pure1 did not return are "
+            "left out of the result: {0}.".format(left_out)
         )
 
 
 def generate_file_systems_dict(module, pure_1):
     arrays = pure1_resolve_arrays(module, pure_1, module.params["array"])
-    selected = None
-    if arrays:
-        selected = set(array["name"].lower() for array in arrays)
     array_filter = filter_in(
         "arrays.name", [array["name"] for array in arrays] if arrays else None
     )
@@ -451,16 +475,23 @@ def generate_file_systems_dict(module, pure_1):
     # array under the same name
     found = {}
     listed = set()
+    owners = {}
     left_out = 0
+    other_array = 0
     for file_system in listing.items:
         row = file_system_row(file_system)
         if row["id"] is not None:
             listed.add(row["id"])
         name = pure1_attr(file_system, "name")
-        on_arrays = array_names(file_system, selected)
-        if name is None or not on_arrays:
+        if name is None:
             left_out += 1
             continue
+        on_arrays, on_other_array = array_names(file_system, arrays, owners)
+        if on_arrays is None:
+            left_out += 1
+            continue
+        if on_other_array:
+            other_array += 1
         if module.params["directories"]:
             row["directories"] = []
         for array in on_arrays:
@@ -472,8 +503,13 @@ def generate_file_systems_dict(module, pure_1):
                 under_name.append(row)
     if left_out:
         module.warn(
-            "Pure1 returned {0} file systems without a name or without an "
-            "array: they are left out of the result.".format(left_out)
+            "File systems that Pure1 returned without a name or without an "
+            "array are left out of the result: {0}.".format(left_out)
+        )
+    if other_array:
+        module.warn(
+            "File systems of an array that has the name of another array are "
+            "left out of the result: {0}.".format(other_array)
         )
     file_systems = {}
     rows = {}

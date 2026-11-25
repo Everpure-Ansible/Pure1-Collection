@@ -21,10 +21,9 @@ description:
     its group and the path of that group.
   - Use it to run tasks on the arrays of a site or a zone, or to find where
     an array sits, without walking the tree in a playbook.
-  - Pure1 refreshes the groups and their members from time to time and not
-    when they change, so a change made on the arrays can take up to about an
-    hour to show. The C(as_of) of a group and of an array in it is the time
-    of the data.
+  - The groups and their member rows can be about an hour old, so a change
+    made on the arrays can take about an hour to show. The C(as_of) of a
+    group and of an array in it is the time of the data.
 options:
   name:
     description:
@@ -40,7 +39,7 @@ options:
     elements: str
   fleet:
     description:
-      - Report only the groups of this fleet.
+      - Report only the groups of this fleet. It takes one name.
       - The name is matched without regard to case and the result has the
         name as Pure1 spells it.
       - The task fails when the name is empty, and when Pure1 does not know
@@ -56,24 +55,28 @@ options:
         C(arrays) holds the named arrays only. An array that is in no group
         gives an empty result.
       - Names are matched without regard to case and the result has the
-        names as Pure1 spells them. The task fails when Pure1 does not know
-        one of the arrays.
+        names as Pure1 spells them. A name that Pure1 does not know fails
+        the task.
       - An empty list counts as not set, and every group is reported.
-      - This option costs one more request to Pure1.
+      - Naming arrays costs one more request to Pure1.
       - Mutually exclusive with I(name). A task that gives both options
         fails, also when one of them is an empty list.
     type: list
     elements: str
 notes:
-  - This module needs py-pure-client 1.99.0 or later. It is the first release
-    with the Pure1 REST 1.7 methods C(get_topology_groups),
-    C(get_topology_groups_members) and C(get_fleets_members). The module also
-    uses C(get_fleets) of Pure1 REST 1.6, which py-pure-client 1.93.0 and
-    later have.
+  - This module makes the Pure1 REST 1.6 call C(get_fleets) and the Pure1
+    REST 1.7 calls C(get_fleets_members), C(get_topology_groups) and
+    C(get_topology_groups_members).
+  - The module reads five listings whatever the options select, the arrays,
+    the fleets, the fleet members, the topology groups and their members,
+    each with one request for every 1,000 objects.
   - Pure1 tells in two places which group an array is in, the member rows of
     the group and the group named on the array itself. The member rows count
     first and the array itself where no row names the array. The C(source) of
     an array says which of the two the result has.
+seealso:
+  - module: everpure.pure1.pure1_arrays
+  - module: everpure.pure1.pure1_fleets
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -90,7 +93,7 @@ EXAMPLES = r"""
 - name: Show the fleet and the path of every array that is in a group
   ansible.builtin.debug:
     msg: "{{ item.key }} is in {{ item.value.path | join(' / ') }} of {{ item.value.fleet }}"
-  loop: "{{ topology.pure1_topology_groups.arrays | dict2items }}"
+  loop: "{{ topology['pure1_topology_groups']['arrays'] | dict2items }}"
 
 - name: Collect one group of one fleet and the groups below it
   everpure.pure1.pure1_topology_groups:
@@ -102,7 +105,7 @@ EXAMPLES = r"""
 - name: Check that Pure1 has the group
   ansible.builtin.assert:
     that:
-      - region.pure1_topology_groups.topology_groups | length > 0
+      - region['pure1_topology_groups']['topology_groups'] | length > 0
     fail_msg: Pure1 has no topology group region1 in fleet1
 
 - name: Check that every array of the region has joined its group
@@ -110,7 +113,7 @@ EXAMPLES = r"""
     that:
       - item.value.arrays | dict2items | rejectattr('value.status', 'equalto', 'joined') | list | length == 0
     quiet: true
-  loop: "{{ region.pure1_topology_groups.topology_groups['fleet1'] | default({}) | dict2items }}"
+  loop: "{{ region['pure1_topology_groups']['topology_groups']['fleet1'] | default({}) | dict2items }}"
 
 - name: Find the topology groups of two arrays
   everpure.pure1.pure1_topology_groups:
@@ -122,14 +125,14 @@ EXAMPLES = r"""
 - name: Check that both arrays are in a topology group
   ansible.builtin.assert:
     that:
-      - placement.pure1_topology_groups.arrays | length == 2
+      - placement['pure1_topology_groups']['arrays'] | length == 2
 
 - name: Show every array of the group that array1 is in
   ansible.builtin.debug:
-    msg: "{{ placement.pure1_topology_groups.topology_groups[where.fleet][where.topology_group].all_arrays }}"
+    msg: "{{ placement['pure1_topology_groups']['topology_groups'][where.fleet][where.topology_group].all_arrays }}"
   vars:
-    where: "{{ placement.pure1_topology_groups.arrays['array1'] }}"
-  when: "'array1' in placement.pure1_topology_groups.arrays"
+    where: "{{ placement['pure1_topology_groups']['arrays']['array1'] }}"
+  when: "'array1' in placement['pure1_topology_groups']['arrays']"
 """
 
 RETURN = r"""
@@ -150,7 +153,7 @@ pure1_topology_groups:
       type: dict
       contains:
         id:
-          description: The Pure1 id of the group.
+          description: The ID of the group in Pure1.
           type: str
         as_of:
           description:
@@ -185,15 +188,16 @@ pure1_topology_groups:
             - Empty when no array is directly in the group.
           type: dict
           contains:
-            id:
+            array_id:
               description:
-                - The Pure1 id of the array.
-                - Null when Pure1 has no array of the name of the member.
+                - The ID in Pure1 of the array that has the name of the
+                  member.
+                - Null when Pure1 knows no array of that name.
               type: str
             member_id:
               description:
-                - The id that the member row gives the array, which need not
-                  be the Pure1 id of the array.
+                - The ID of the member in its member row. For a FlashArray it
+                  is not the ID of the array in Pure1, which is C(array_id).
                 - Null when C(source) is C(arrays).
               type: str
             status:
@@ -204,8 +208,8 @@ pure1_topology_groups:
               type: str
             status_details:
               description:
-                - More about the status, an empty text when Pure1 has nothing
-                  to add.
+                - More about the status, an empty string when Pure1 has
+                  nothing to add.
                 - Null when C(source) is C(arrays).
               type: str
             source:
@@ -291,15 +295,15 @@ pure1_topology_groups:
           children: []
           arrays:
             array1:
-              id: 1d2e3f40-5a6b-4c7d-8e9f-a0b1c2d3e4f5
-              member_id: 1d2e3f40-5a6b-4c7d-8e9f-a0b1c2d3e4f5
+              array_id: 1d2e3f40-5a6b-4c7d-8e9f-a0b1c2d3e4f5
+              member_id: 7c8d9e0f-1a2b-4c3d-9e4f-5a6b7c8d9e0f
               status: joined
               status_details: ""
               source: both
               as_of: "2021-02-03 13:04:05 UTC"
               as_of_epoch: 1612357445000
             array2:
-              id: 2e3f4051-6b7c-4d8e-9fa0-b1c2d3e4f506
+              array_id: 2e3f4051-6b7c-4d8e-9fa0-b1c2d3e4f506
               member_id: 2e3f4051-6b7c-4d8e-9fa0-b1c2d3e4f506
               status: joined
               status_details: ""
@@ -330,12 +334,12 @@ pure1_topology_groups:
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.everpure.pure1.plugins.module_utils.fleets import (
     pure1_fleet_map,
+    pure1_list_arrays,
+    pure1_resolve_fleets,
 )
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     get_pure1,
     pure1_argument_spec,
-    pure1_attr,
-    pure1_list,
     pure1_require,
     pure1_resolve_arrays,
 )
@@ -350,48 +354,11 @@ REQUIRED_METHODS = (
 )
 
 
-def list_arrays(module, pure_1):
-    """Return every array of Pure1, which the fleet map joins the members to"""
-
-    def all_arrays(**page):
-        return pure_1.get_arrays(**page)
-
-    listing = pure1_list(module, "get_arrays", all_arrays)
-    if listing.truncated:
-        module.warn(
-            "Pure1 returned {0} of {1} arrays: the result may be incomplete.".format(
-                len(listing.items),
-                "an unknown number of" if listing.total is None else listing.total,
-            )
-        )
-    names = [pure1_attr(array, "name") for array in listing.items]
-    left_out = len(names) - len(set(names).difference([None]))
-    if left_out:
-        module.warn(
-            "Arrays that Pure1 returned without a name or with the name of "
-            "another array are left out of the result: {0}.".format(left_out)
-        )
-    return listing.items
-
-
 def resolve_fleet(module, fleets, name):
     """Return the fleet of the task as Pure1 spells it, None when it names none"""
     if name is None:
         return None
-    # The spelling of the task wins over the same name in another case
-    found = [fleet for fleet in fleets if fleet == name] or [
-        fleet for fleet in fleets if fleet.lower() == name.lower()
-    ]
-    if len(found) > 1:
-        module.fail_json(
-            msg="Pure1 knows more than one fleet whose name is {0} in another "
-            "case: {1}. Give the name as Pure1 spells it.".format(
-                name, ", ".join(found)
-            )
-        )
-    if not found:
-        module.fail_json(msg="Fleet {0} is not known to Pure1.".format(name))
-    return found[0]
+    return pure1_resolve_fleets(module, fleets, [name])[0]
 
 
 def select_groups(groups, names, arrays):
@@ -426,7 +393,7 @@ def group_record(entry):
         children=entry["children"],
         arrays={
             name: dict(
-                id=member["array_id"],
+                array_id=member["array_id"],
                 member_id=member["member_id"],
                 status=member["status"],
                 status_details=member["status_details"],
@@ -448,7 +415,12 @@ def generate_topology_groups_dict(module, pure_1):
     arrays = None if resolved is None else [array["name"] for array in resolved]
     # Every listing whole: Pure1 fails a request that names an array or a
     # group it has no row for, so the selection is made here
-    membership = pure1_fleet_map(module, pure_1, arrays=list_arrays(module, pure_1))
+
+    def all_arrays(**page):
+        return pure_1.get_arrays(**page)
+
+    known = pure1_list_arrays(module, all_arrays)
+    membership = pure1_fleet_map(module, pure_1, arrays=list(known.values()))
     fleet = resolve_fleet(module, membership["fleets"], fleet)
     groups = membership["topology_groups"]
     if fleet is not None:

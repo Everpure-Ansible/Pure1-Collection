@@ -14,7 +14,7 @@ module: pure1_cves
 version_added: '1.6.0'
 short_description: Collect CVEs and the arrays they affect from Pure1
 description:
-  - Returns the common vulnerabilities and exposures (CVEs) that Pure1 keeps
+  - Collect the common vulnerabilities and exposures (CVEs) that Pure1 keeps
     a record of, each with its severity, its CVSS score, the link to its
     knowledge base article, the Purity releases and patches that fix it, and
     the arrays of the organization it affects with the listed fix releases
@@ -45,14 +45,14 @@ options:
     elements: str
   name:
     description:
-      - Ids of the CVEs to return, each in the form C(CVE-<year>-<number>),
+      - IDs of the CVEs to return, each in the form C(CVE-<year>-<number>),
         in upper or lower case. All CVEs that the other options select when
         not set or empty.
-      - An id that is not of this form fails the task. An id that Pure1 has
+      - An ID that is not of this form fails the task. An ID that Pure1 has
         no record of, or that no security insight reports while
         I(affected_only) is C(true), is not an error and is not returned.
       - With I(affected_only) set to C(false), Pure1 is asked once for every
-        100 ids.
+        100 IDs.
     type: list
     elements: str
   severity:
@@ -82,7 +82,7 @@ options:
       - With C(false) the CVEs come from the catalogue that Pure1 keeps for
         every organization, whether they affect an array or not. At least
         one of I(name), I(severity), I(min_cvss), I(window) and I(limit)
-        must then be given.
+        must then be given. I(array) cannot be given then.
     type: bool
     default: true
   window:
@@ -107,13 +107,14 @@ options:
       - With C(0) no CVE is returned, only C(total).
       - The CVEs are put in their order by the module, so Pure1 is asked for
         every selected CVE unless the limit is C(0). A listing of the
-        catalogue without I(name) costs one request for every 1000 selected
+        catalogue without I(name) costs one request for every 1,000 selected
         CVEs.
     type: int
 notes:
-  - This module requires py-pure-client 1.91.0 or later, the first release
-    with the C(get_assessment_security_cves) and
-    C(get_assessment_security_insights_arrays) methods of Pure1 REST 1.5.
+  - The Pure1 REST 1.5 calls this module makes,
+    C(get_assessment_security_cves) and
+    C(get_assessment_security_insights_arrays), came with py-pure-client
+    1.91.0.
   - Besides the CVEs the module reads the security insights of the arrays,
     with one request. The CVEs that the insights report are looked up with
     one request for every 100 CVEs.
@@ -123,6 +124,8 @@ notes:
     selects and an insight reports the CVE with one of the severities. With
     I(min_cvss) or I(window), and with a I(limit) of C(0), such a CVE cannot
     be told from one that the options leave out, and no warning is given.
+seealso:
+  - module: everpure.pure1.pure1_security
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -179,7 +182,7 @@ EXAMPLES = r"""
     limit: 10
   register: recent
 
-- name: Show the ids of the new CVEs
+- name: Show the IDs of the new CVEs
   ansible.builtin.debug:
     msg: "{{ recent['pure1_cves']['cves'] | list }}"
   when: recent['pure1_cves']['returned'] > 0
@@ -219,7 +222,7 @@ pure1_cves:
       type: bool
     cves:
       description:
-        - The CVEs, as a dictionary keyed by the id of the CVE. The value
+        - The CVEs, as a dictionary keyed by the ID of the CVE. The value
           for a CVE is a dictionary with the keys listed here.
         - The CVEs are in the order of their severity, the worst first, and
           within one severity in the order of their score, the highest
@@ -246,7 +249,7 @@ pure1_cves:
           type: str
         detected:
           description:
-            - The day Pure1 created its record of the CVE, as
+            - The day Pure1 created its record of the CVE, in UTC, as
               C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         detected_epoch:
@@ -256,7 +259,7 @@ pure1_cves:
           type: int
         updated:
           description:
-            - The time Pure1 last changed its record of the CVE, as
+            - The time Pure1 last changed its record of the CVE, in UTC, as
               C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         updated_epoch:
@@ -296,7 +299,7 @@ pure1_cves:
               description: The name of the array.
               type: str
             id:
-              description: The id of the array in Pure1.
+              description: The ID of the array in Pure1.
               type: str
             fqdn:
               description:
@@ -333,7 +336,7 @@ pure1_cves:
           description:
             - The Purity releases that the CVE affects, as a dictionary
               keyed by operating system, as C(fixed_in_versions) is.
-          returned: when I(include_affected_versions) is C(true)
+          returned: when I(include_affected_versions) is true
           type: dict
   sample:
     total: 2
@@ -772,8 +775,8 @@ def generate_cves_dict(module, pure_1, names):
     left_out_warning(module, "CVEs that Pure1 returned without an id", no_id)
     if same_id:
         module.warn(
-            "Pure1 returned {0} CVEs under the id of another CVE: of each such "
-            "id only the CVE returned first is in the result.".format(same_id)
+            "CVEs that Pure1 returned under the id of another CVE are left out "
+            "of the result, which keeps the CVE returned first: {0}.".format(same_id)
         )
     if params["affected_only"] and limit != 0:
         missing = [cve_id for cve_id in ids if cve_id not in cves]

@@ -25,9 +25,9 @@ description:
   - Every option narrows the result. An array is returned when it matches
     every option that is set, and without options every array is returned.
   - Pure1 keeps what an array last reported to it. C(as_of) of an array is the
-    time of that data and C(age_seconds) its age when the module ran. Pure1
-    refreshes the member rows of fleets and topology groups, which give
-    C(fleet) and C(topology_group), about once an hour.
+    time of that data and C(age_seconds) its age when the module ran. The
+    member rows of fleets and topology groups, which give C(fleet) and
+    C(topology_group), can be about an hour old.
 options:
   name:
     description:
@@ -133,11 +133,9 @@ options:
     type: list
     elements: str
 notes:
-  - This module requires py-pure-client 1.99.0 or later, the first release
-    with the C(get_fleets_members), C(get_topology_groups) and
-    C(get_topology_groups_members) methods of Pure1 REST 1.7. It also uses
-    C(get_fleets) of Pure1 REST 1.6, which py-pure-client 1.93.0 and later
-    have.
+  - This module makes the Pure1 REST 1.6 call C(get_fleets) and the Pure1
+    REST 1.7 calls C(get_fleets_members), C(get_topology_groups) and
+    C(get_topology_groups_members).
   - The module reads five listings whatever the options select, the arrays,
     the fleets, the fleet members, the topology groups and their members,
     each with one request for every 1,000 objects, and the tags of the arrays
@@ -150,6 +148,10 @@ notes:
     row names the array. C(fleet_source) of an array says which of the two
     the result has. The M(everpure.pure1.pure1_fleets) module lists the
     arrays for which they differ.
+seealso:
+  - module: everpure.pure1.pure1_fleets
+  - module: everpure.pure1.pure1_topology_groups
+  - module: everpure.pure1.pure1_array_tags
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -166,7 +168,7 @@ EXAMPLES = r"""
 - name: Show the product, the model and the version of each array
   ansible.builtin.debug:
     msg: "{{ item.key }} is a {{ item.value.type }} {{ item.value.model }} on {{ item.value.version }}"
-  loop: "{{ everything.pure1_arrays.arrays | dict2items }}"
+  loop: "{{ everything['pure1_arrays']['arrays'] | dict2items }}"
 
 - name: Look up two arrays by name
   everpure.pure1.pure1_arrays:
@@ -178,9 +180,9 @@ EXAMPLES = r"""
 - name: Check that Pure1 knows both arrays and has heard of them in the last hour
   ansible.builtin.assert:
     that:
-      - named.pure1_arrays.arrays | length == 2
-      - named.pure1_arrays.arrays | dict2items | selectattr('value.age_seconds', 'none') | list | length == 0
-      - named.pure1_arrays.arrays | dict2items | selectattr('value.age_seconds', 'ge', 3600) | list | length == 0
+      - named['pure1_arrays']['arrays'] | length == 2
+      - named['pure1_arrays']['arrays'] | dict2items | selectattr('value.age_seconds', 'none') | list | length == 0
+      - named['pure1_arrays']['arrays'] | dict2items | selectattr('value.age_seconds', 'ge', 3600) | list | length == 0
     fail_msg: Pure1 does not know both arrays, or its data of one has no time or is older than an hour
 
 - name: Collect the FlashArray//X90 arrays of one site of a fleet that run a release before 6.5.10
@@ -195,8 +197,8 @@ EXAMPLES = r"""
 - name: Stop when an array of the site still has to be upgraded
   ansible.builtin.assert:
     that:
-      - outdated.pure1_arrays.arrays | length == 0
-    fail_msg: "Upgrade these arrays first: {{ outdated.pure1_arrays.arrays | list | join(', ') }}"
+      - outdated['pure1_arrays']['arrays'] | length == 0
+    fail_msg: "Upgrade these arrays first: {{ outdated['pure1_arrays']['arrays'] | list | join(', ') }}"
 
 - name: Collect the FlashBlades on a 4.5 release that are tagged as highly critical and have a team
   everpure.pure1.pure1_arrays:
@@ -211,13 +213,13 @@ EXAMPLES = r"""
 - name: Show where to reach each of them
   ansible.builtin.debug:
     msg: "{{ item.key }} ({{ item.value.id }}) is at {{ item.value.fqdn }}"
-  loop: "{{ tagged.pure1_arrays.arrays | dict2items }}"
+  loop: "{{ tagged['pure1_arrays']['arrays'] | dict2items }}"
   when: item.value.fqdn is not none
 """
 
 RETURN = r"""
 pure1_arrays:
-  description: The arrays that Pure1 knows and the options select
+  description: The arrays that Pure1 knows and the options select.
   returned: always
   type: dict
   contains:
@@ -226,6 +228,9 @@ pure1_arrays:
         - The arrays, as a dictionary keyed by array name, in the order of
           the names. The value for an array is a dictionary with the keys
           listed here.
+        - Where two arrays carry one name, the array that Pure1 returns first
+          keeps the name. The other one is left out, and the module gives a
+          warning that counts the arrays left out.
         - A key is null when Pure1 reports no value for it.
         - Empty when the options select no array.
       type: dict
@@ -349,6 +354,7 @@ from ansible_collections.everpure.pure1.plugins.module_utils.fleets import (
     ARRAY_TYPES,
     pure1_array_record,
     pure1_fleet_map,
+    pure1_resolve_fleets,
     pure1_tag_map,
 )
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
@@ -442,20 +448,7 @@ def resolve_fleet(module, fleets, name):
     """Return the fleet of the task as Pure1 spells it, None when it names none"""
     if name is None:
         return None
-    # The spelling of the task wins over the same name in another case
-    found = [fleet for fleet in fleets if fleet == name] or [
-        fleet for fleet in fleets if fleet.lower() == name.lower()
-    ]
-    if len(found) > 1:
-        module.fail_json(
-            msg="Pure1 knows more than one fleet whose name is {0} in another "
-            "case: {1}. Give the name as Pure1 spells it.".format(
-                name, ", ".join(found)
-            )
-        )
-    if not found:
-        module.fail_json(msg="Fleet {0} is not known to Pure1.".format(name))
-    return found[0]
+    return pure1_resolve_fleets(module, fleets, [name])[0]
 
 
 def arrays_in_group(module, membership, group, fleet):

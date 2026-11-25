@@ -61,9 +61,17 @@ for more details.
 
 This collection can be used to report on the Everpure arrays of a Pure1 organization and to manage array tags in Pure1, either on its own or as part of larger playbooks. For example:
 * Collect organization-wide information from Pure1: appliances, subscriptions and subscription licenses, support contracts, invoices and environmental data
+* List the arrays of the organization and select them by name, product, model, version, fleet, topology group or tag
+* Collect the fleets with their members and the topology groups of the fleets
 * List the volumes, pods, drives, ports and network interfaces of all appliances or of a single array
+* Collect the hardware components and the controllers of arrays, to find components that are not healthy and to check the controller redundancy
+* Collect file systems with their managed directories, and object store accounts with their buckets
+* Collect the replica links of pods, file systems and buckets with their lag and recovery point, the replication targets, and the protection group snapshots that replication stored on a target array
 * Collect open, closing or closed alerts of a chosen severity, for all appliances or for a single array
-* Collect historical capacity and performance metrics for volumes
+* Collect audit records, to see who ran which command on which array
+* Collect the security assessment of arrays and the CVEs that affect them
+* Collect the recommendations of Pure1 for hardware upgrades, license upgrades and support contract renewals
+* Collect the latest value or the history of capacity and performance metrics for arrays, volumes, pods, file systems, directories, buckets, object store accounts and subscription licenses
 * Create, update and remove array tags in Pure1
 
 ### Example Playbook

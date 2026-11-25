@@ -75,8 +75,11 @@ SECRET_PATTERNS = (
 CERTIFICATE_FAILURE = "CERTIFICATE_VERIFY_FAILED"
 # The reason given for a request whose target is too long for Pure1. Pure1
 # takes a request line of up to 8192 bytes, and refuses a shorter one too
-# when it is too long together with its headers.
-REQUEST_TOO_LONG = "The request is too long for Pure1: give fewer names in one task."
+# when it is too long together with its headers. What makes a request long
+# are the names, the IDs or the protection groups that a task gives.
+REQUEST_TOO_LONG = (
+    "The request is too long for Pure1: give fewer names or IDs in one task."
+)
 # Past 8192 bytes Pure1 answers HTTP 414, which py-pure-client raises as a
 # PureError, also from the request for a later page
 URI_TOO_LONG = re.compile(
@@ -221,17 +224,41 @@ def _request(module, action, request, fail, read=None):
     raise error
 
 
+def _rest_of_page(items):
+    """Return what the SDK iterator left of the page it ended in
+
+    The iterator ends where its place within a page reaches the total that
+    Pure1 reported, so of a page that carries more items than that total it
+    hands out only as many as the total. What is left of the page ends at
+    the limit of the request, where the iterator ends as well. Nothing is
+    left where it ended at the end of a page, and nothing is taken from
+    what is no such iterator.
+    """
+    page = getattr(items, "_items", None)
+    place = getattr(items, "_ItemIterator__index", None)
+    if not isinstance(page, list) or not isinstance(place, int):
+        return []
+    keywords = getattr(items, "_kwargs", None)
+    limit = keywords.get("limit") if isinstance(keywords, dict) else None
+    if limit is None:
+        return page[place:]
+    return page[place : max(place, limit)]
+
+
 def _items(wanted, res):
     """Return the items of an answer as a list, all of them or at most wanted
 
     The SDK fetches the pages after the first while the items are read, and
-    fetches no page that the wanted items do not need.
+    fetches no page that the wanted items do not need. A page that carries
+    more items than the total Pure1 reported is read whole.
     """
     if res.items is None:
         return []
     if wanted is None:
-        return list(res.items)
-    return list(itertools.islice(res.items, wanted))
+        found = list(res.items)
+        return found + _rest_of_page(res.items)
+    found = list(itertools.islice(res.items, wanted))
+    return found + _rest_of_page(res.items)[: wanted - len(found)]
 
 
 def _page(wanted, res):
@@ -304,7 +331,9 @@ def pure1_list(module, action, request, limit=None, fail=True):
     for the request (None when it reported none), and truncated tells that
     the items are not all of them: there are fewer than Pure1 reported, or
     Pure1 reported no total and the helper could not ask whether more exist.
-    A listing is never returned short with truncated False.
+    A listing is never returned short with truncated False. A page that
+    carries more items than the total Pure1 reported is returned whole, and
+    no page after it is asked for: the total is reached.
 
     request is a function that makes the call and hands the paging keywords
     it is given on to the client. It sets none of limit, offset and
@@ -522,11 +551,16 @@ def filter_and(*terms):
 def pure1_time(milliseconds):
     """Return a Pure1 time, milliseconds since 1970, as "YYYY-MM-DD HH:MM:SS UTC"
 
-    Always in UTC, whatever the time zone of the host, and None for None.
+    Always in UTC, whatever the time zone of the host. None for None and for
+    a value that cannot be a time: one that is no number, a boolean, and a
+    number that the platform cannot convert. It never raises.
     """
-    if milliseconds is None:
+    if milliseconds is None or isinstance(milliseconds, bool):
         return None
-    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(milliseconds / 1000))
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(milliseconds / 1000))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def pure1_attr(item, path, default=None):
@@ -610,6 +644,44 @@ def pure1_resolve_arrays(module, pure_1, names):
     ]
 
 
+def pure1_is_one_of(arrays, reference):
+    """Tell whether a reference to an array is to one of the arrays of the task
+
+    arrays are the arrays as pure1_resolve_arrays() returns them and
+    reference is the array reference of a row, as the SDK model. The id
+    tells an array from another one of the same name, or of that name in
+    another case: Pure1 compares names whatever their case, so a filter on
+    the names also returns the rows of such an array. Where Pure1 sent no
+    id, for the reference or for the array, the name must be the same as
+    Pure1 spells it.
+    """
+    reference_id = pure1_attr(reference, "id")
+    name = pure1_attr(reference, "name")
+    for array in arrays:
+        if reference_id is not None and array["id"] is not None:
+            if reference_id == array["id"]:
+                return True
+        elif name is not None and name == array["name"]:
+            return True
+    return False
+
+
+def pure1_keeps_name(owners, name, array_id):
+    """Tell whether an array is the one that has its name in the result
+
+    A result that is keyed by array name has one array under a name: the
+    array that is seen first keeps it. owners is a dictionary of the
+    caller, empty at first, in which the id of that array is kept by the
+    name. Arrays are told apart by their ids, so a reference without an id
+    is taken for the array that has the name. The caller leaves out the rows
+    of an array that does not keep its name and counts them in one warning.
+    """
+    owner = owners.setdefault(name, array_id)
+    if owner is None:
+        owners[name] = array_id
+    return owner is None or array_id is None or owner == array_id
+
+
 def _sdk_release():
     """Return the release of the installed py-pure-client, None if it is not known"""
     try:
@@ -670,8 +742,8 @@ def _client_arguments(module, app_id, key_file):
     elif not validate_certs:
         module.warn(
             "validate_certs is false, but the installed py-pure-client cannot "
-            "switch the verification off: the certificate of Pure1 is still "
-            "verified. py-pure-client 1.71.0 and later can."
+            "switch the verification off, which py-pure-client 1.71.0 and later "
+            "can: the certificate of Pure1 is still verified."
         )
     return arguments
 

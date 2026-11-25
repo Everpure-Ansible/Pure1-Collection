@@ -2523,13 +2523,20 @@ class TestDocumentation:
     def _documentation():
         return yaml.safe_load(pure1_arrays.DOCUMENTATION)
 
-    def test_every_required_method_is_in_a_note_with_its_release(self):
+    def test_every_required_method_is_in_the_note_that_names_no_release(self):
+        """The collection requires the py-pure-client that has them all: a
+        note with a release would read as a requirement of its own."""
         notes = self._documentation()["notes"]
 
-        for method, minimum in pure1_arrays.REQUIRED_METHODS:
+        assert notes[0] == (
+            "This module makes the Pure1 REST 1.6 call C(get_fleets) and the "
+            "Pure1 REST 1.7 calls C(get_fleets_members), C(get_topology_groups) "
+            "and C(get_topology_groups_members)."
+        )
+        for method, _minimum in pure1_arrays.REQUIRED_METHODS:
             named = [note for note in notes if "C({0})".format(method) in note]
-            assert len(named) == 1, method
-            assert "py-pure-client {0}".format(minimum) in named[0], method
+            assert named == [notes[0]], method
+        assert "py-pure-client" not in " ".join(notes)
 
     def test_options_are_those_of_the_scope_and_no_raw_filter(self):
         options = self._documentation()["options"]

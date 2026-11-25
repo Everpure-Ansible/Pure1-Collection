@@ -29,57 +29,61 @@ options:
     description:
       - Names of the arrays whose records are returned. The records of every
         array are returned when it is not set or empty.
-      - A name is matched whatever its case, and the result carries the name
-        as Pure1 spells it. A name Pure1 does not know fails the task.
-      - Costs one more request.
+      - A name is matched without regard to case, and the result carries the
+        name as Pure1 spells it. A name that Pure1 does not know fails the
+        task.
+      - Naming arrays costs one more request to Pure1.
     type: list
     elements: str
   user:
     description:
-      - Name of one user, matched whatever its case. Only the records of this
-        user are returned.
-      - Mutually exclusive with I(exclude_users).
+      - Name of one user, matched without regard to case. Only the records
+        of this user are returned.
+      - Mutually exclusive with I(exclude_users). A task that gives both
+        options fails, also when I(exclude_users) is an empty list.
     type: str
   exclude_users:
     description:
-      - Names of users whose records are left out, matched whatever their
+      - Names of users whose records are left out, matched without regard to
         case. No user is left out when it is not set or empty.
       - A name with a single quote fails the task, because Pure1 cannot leave
         such a user out.
-      - Mutually exclusive with I(user), also when it is empty.
+      - Mutually exclusive with I(user). A task that gives both options
+        fails, also when I(exclude_users) is an empty list.
     type: list
     elements: str
   command:
     description:
-      - One command, such as C(purevol) or C(purefs), matched whatever its
-        case. Only the records of this command are returned.
+      - One command, such as C(purevol) or C(purefs), matched without regard
+        to case. Only the records of this command are returned.
     type: str
   subcommand:
     description:
-      - Subcommands, such as C(destroy) and C(eradicate), matched whatever
-        their case. Only the records with one of them are returned, and
+      - Subcommands, such as C(destroy) and C(eradicate), matched without
+        regard to case. Only the records with one of them are returned, and
         those with any subcommand when it is not set or empty.
       - A value must be the whole subcommand. I(subcommand_contains) also
         finds a subcommand of several words, such as C(snapshot destroy).
       - Several values of which one holds a single quote fail the task,
         because Pure1 cannot filter on them. One such value alone works.
-      - Mutually exclusive with I(subcommand_contains), also when it is
-        empty.
+      - Mutually exclusive with I(subcommand_contains). A task that gives
+        both options fails, also when I(subcommand) is an empty list.
     type: list
     elements: str
   subcommand_contains:
     description:
-      - One text, matched whatever its case. Only the records whose
+      - One text, matched without regard to case. Only the records whose
         subcommand holds this text are returned.
       - A text with a single quote fails the task, because Pure1 cannot
         search for it.
-      - Mutually exclusive with I(subcommand).
+      - Mutually exclusive with I(subcommand). A task that gives both
+        options fails, also when I(subcommand) is an empty list.
     type: str
   arguments:
     description:
       - One text, such as the name of a volume, a host or a pod, matched
-        whatever its case. Only the records whose arguments hold this text
-        are returned.
+        without regard to case. Only the records whose arguments hold this
+        text are returned.
       - A text with a single quote fails the task, because Pure1 cannot
         search for it.
     type: str
@@ -94,7 +98,7 @@ options:
     default: 86400
   start_time:
     description:
-      - Start of the period, in milliseconds since the UNIX epoch. Only the
+      - Start of the period, in milliseconds since the epoch. Only the
         records of this time and later are returned.
       - Must not be after I(end_time). Pure1 refuses a period longer than 30
         days, and the task fails with the message of Pure1.
@@ -102,7 +106,7 @@ options:
     type: int
   end_time:
     description:
-      - End of the period, in milliseconds since the UNIX epoch. Only the
+      - End of the period, in milliseconds since the epoch. Only the
         records before this time are returned.
       - Defaults to the time at which the module starts, by the clock of the
         host it runs on.
@@ -112,8 +116,8 @@ options:
       - The most records to return, the newest first. Must be 0 or more.
         An organization can hold tens of thousands of records for one day.
       - With C(0) no record is returned, only C(total).
-      - Pure1 gives up to 1000 records with one request. A higher limit
-        costs one request for every 1000 records.
+      - Pure1 gives up to 1,000 records with one request. A higher limit
+        costs one request for every 1,000 records.
     type: int
     default: 1000
 author:
@@ -192,7 +196,7 @@ EXAMPLES = r"""
 
 RETURN = r"""
 pure1_audits:
-  description: Returns the audit records collected from Pure1
+  description: The audit records collected from Pure1.
   returned: always
   type: dict
   contains:
@@ -212,19 +216,19 @@ pure1_audits:
       type: bool
     start:
       description:
-        - Start of the period the records are from, as
+        - Start of the period the records are from, in UTC, as
           C(YYYY-MM-DD HH:MM:SS UTC).
       type: str
     start_epoch:
-      description: Start of the period, in milliseconds since the UNIX epoch.
+      description: Start of the period, in milliseconds since the epoch.
       type: int
     end:
       description:
-        - End of the period, as C(YYYY-MM-DD HH:MM:SS UTC). A record of
-          exactly this time is not part of the period.
+        - End of the period, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC). A record
+          of exactly this time is not part of the period.
       type: str
     end_epoch:
-      description: End of the period, in milliseconds since the UNIX epoch.
+      description: End of the period, in milliseconds since the epoch.
       type: int
     by_array:
       description:
@@ -254,10 +258,10 @@ pure1_audits:
           description: The Pure1 ID of the record.
           type: str
         time:
-          description: When the command was run, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: When the command was run, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         time_epoch:
-          description: When the command was run, in milliseconds since the UNIX epoch.
+          description: When the command was run, in milliseconds since the epoch.
           type: int
         array:
           description: The array the command was run on.

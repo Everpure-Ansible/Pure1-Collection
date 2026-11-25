@@ -34,9 +34,11 @@ options:
       - Pure1 reports no controller for a FlashBlade. A named array without a
         controller is absent from the result, and the module gives one
         warning that names those arrays.
-      - The names are looked up with one more request to Pure1.
+      - Naming arrays costs one more request to Pure1.
     type: list
     elements: str
+seealso:
+  - module: everpure.pure1.pure1_hardware
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -95,9 +97,10 @@ pure1_controllers:
         - A key is null when Pure1 reports no value for it.
         - Empty when Pure1 reports no controller. An array without a
           controller, as every FlashBlade, has no key.
-        - Pure1 can have more than one array of a name. The result then has
-          only the array whose controller Pure1 returns first, and the module
-          gives a warning that counts the arrays left out.
+        - Where two arrays carry one name, the array whose controller Pure1
+          returns first keeps the name. The controllers of the other one are
+          left out, and the module gives a warning that counts the arrays
+          left out.
       type: dict
       contains:
         id:
@@ -126,7 +129,9 @@ pure1_controllers:
           description: Purity version that the controller runs.
           type: str
         as_of:
-          description: Time at which Pure1 last refreshed the controller, in UTC.
+          description:
+            - Time at which Pure1 last refreshed the controller, in UTC, as
+              C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
           description:
@@ -152,7 +157,7 @@ pure1_controllers:
         as_of:
           description:
             - Time at which Pure1 last refreshed the controllers of the
-              array, in UTC.
+              array, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
             - The older time when the controllers differ.
           type: str
         as_of_epoch:
@@ -240,6 +245,7 @@ from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     get_pure1,
     pure1_argument_spec,
     pure1_attr,
+    pure1_is_one_of,
     pure1_list,
     pure1_resolve_arrays,
     pure1_time,
@@ -338,16 +344,13 @@ def generate_controllers_dict(module, pure_1):
 
     listing = pure1_list(module, "get_controllers", list_controllers)
     if listing.truncated:
-        if listing.total is None:
-            module.warn(
-                "Pure1 returned {0} controllers and did not say whether there "
-                "are more: the result may be incomplete.".format(len(listing.items))
+        module.warn(
+            "Pure1 returned {0} of {1} controllers: the result may be "
+            "incomplete.".format(
+                len(listing.items),
+                "an unknown number of" if listing.total is None else listing.total,
             )
-        else:
-            module.warn(
-                "Pure1 returned {0} of {1} controllers: the result may be "
-                "incomplete.".format(len(listing.items), listing.total)
-            )
+        )
 
     found = {}
     references = {}
@@ -363,9 +366,9 @@ def generate_controllers_dict(module, pure_1):
             unfiled += 1
             continue
         array = reference.name
-        if names is not None and array not in names:
-            # Pure1 matches a name whatever its case: an array whose name
-            # differs from a wanted one in case only was not asked for
+        if arrays is not None and not pure1_is_one_of(arrays, reference):
+            # Pure1 matches a name whatever its case: the controllers of an
+            # array that is none of those the task names were not asked for
             continue
         array_id = pure1_attr(reference, "id")
         owner = owners.get(array)
@@ -384,18 +387,18 @@ def generate_controllers_dict(module, pure_1):
     if unfiled:
         module.warn(
             "Controllers that Pure1 returned without a name or without an "
-            "array are left out of the result: {0}".format(unfiled)
+            "array are left out of the result: {0}.".format(unfiled)
         )
     if repeated:
         module.warn(
             "Controllers that Pure1 returned under the name of another "
             "controller of the same array are left out of the result: "
-            "{0}".format(repeated)
+            "{0}.".format(repeated)
         )
     if namesakes:
         module.warn(
             "Arrays that Pure1 returned under the name of another array are "
-            "left out of the result: {0}".format(len(namesakes))
+            "left out of the result: {0}.".format(len(namesakes))
         )
     absent = [name for name in names or [] if name not in found]
     if absent:

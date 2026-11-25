@@ -28,7 +28,7 @@ MODULES = sorted(
     if name.startswith("pure1_") and name.endswith(".py")
 )
 # What a task of an example holds besides its module
-TASK_KEYWORDS = {"name", "register", "loop", "when", "vars"}
+TASK_KEYWORDS = {"name", "register", "loop", "loop_control", "when", "vars"}
 
 
 def _assignments(module):
@@ -74,7 +74,7 @@ def test_examples_read_only_what_an_earlier_task_registered(module):
     for task in _examples(module):
         known = registered | set(task.get("vars", {}))
         if "loop" in task:
-            known.add("item")
+            known.add(task.get("loop_control", {}).get("loop_var", "item"))
         read = set(re.findall(r"\{\{\s*(\w+)", json.dumps(task)))
         assert read <= known, task["name"]
         if "register" in task:

@@ -301,13 +301,10 @@ class TestRequest:
             "type=('unsafe_password_configuration','open_critical_alerts_detected')"
         )
 
-    @pytest.mark.parametrize("keep_named", [False, True])
-    def test_empty_list_of_arrays_asks_for_nothing(self, pure1_client, keep_named):
+    def test_empty_list_of_arrays_asks_for_nothing(self, pure1_client):
         module = ansible_module()
 
-        result = pure1_security_insights(
-            module, pure1_client, [], types=[PASSWORD], keep_named=keep_named
-        )
+        result = pure1_security_insights(module, pure1_client, [], types=[PASSWORD])
 
         getattr(pure1_client, METHOD).assert_not_called()
         assert result == {"arrays": {}, "cves": {}}
@@ -420,7 +417,7 @@ class TestRequest:
                 ),
                 "Pure1 request get_assessment_security_insights_arrays failed "
                 "(HTTP 400): The request is too long for Pure1: give fewer "
-                "names in one task.",
+                "names or IDs in one task.",
                 id="too many names",
             ),
             pytest.param(
@@ -894,63 +891,24 @@ class TestSelection:
         module.warn.assert_not_called()
 
     def test_named_array_without_insights_is_no_key(self, pure1_client):
-        module, result = _read(
-            pure1_client, [_insight("array1")], [_record("array2"), _record("array1")]
-        )
+        records = [_record("array2", fqdn=None), _record("array1")]
+        given = copy.deepcopy(records)
+
+        module, result = _read(pure1_client, [_insight("array1")], records)
 
         assert result == {"arrays": {"array1": _entry("array1")}, "cves": {}}
-        module.warn.assert_not_called()
-
-    def test_keep_named_gives_every_array_given_an_entry(self, pure1_client):
-        records = [
-            _record("array3", fqdn=None),
-            _record("array1"),
-            _record("array2", id="id-2", fqdn="two.example.com"),
-        ]
-        given = copy.deepcopy(records)
-        insight = _insight("array1", HIGH_CVE, cves=[("CVE-2024-1", "high")])
-
-        module, result = _read(pure1_client, [insight], records, keep_named=True)
-
-        assert result == {
-            "arrays": {
-                "array1": _entry("array1", [HIGH_CVE], cves=_cves(high=["CVE-2024-1"])),
-                "array2": {
-                    "id": "id-2",
-                    "fqdn": "two.example.com",
-                    "insight_types": [],
-                    "insights": [],
-                    "cves": {"critical": [], "high": [], "medium": [], "low": []},
-                },
-                "array3": {
-                    "id": "id-array3",
-                    "fqdn": None,
-                    "insight_types": [],
-                    "insights": [],
-                    "cves": {"critical": [], "high": [], "medium": [], "low": []},
-                },
-            },
-            "cves": {"CVE-2024-1": ["array1"]},
-        }
-        assert list(result["arrays"]) == ["array1", "array2", "array3"]
+        # the records of the caller are read, not changed
         assert records == given
         module.warn.assert_not_called()
 
-    def test_keep_named_with_two_records_of_one_name(self, pure1_client):
-        records = [_record("array1"), _record("array1", id="id-other")]
+    def test_keep_named_is_no_parameter(self, pure1_client):
+        """No module used it: pure1_security adds the arrays it names itself."""
+        with pytest.raises(TypeError, match="keep_named"):
+            pure1_security_insights(
+                ansible_module(), pure1_client, [_record("array1")], keep_named=True
+            )
 
-        result = _read(pure1_client, [], records, keep_named=True)[1]
-
-        assert result == {
-            "arrays": {"array1": _entry("array1", [])},
-            "cves": {},
-        }
-
-    def test_keep_named_without_arrays_adds_nothing(self, pure1_client):
-        module, result = _read(pure1_client, [_insight("array1")], keep_named=True)
-
-        assert result == {"arrays": {"array1": _entry("array1")}, "cves": {}}
-        module.warn.assert_not_called()
+        getattr(pure1_client, METHOD).assert_not_called()
 
 
 class TestSameName:
@@ -985,7 +943,7 @@ class TestSameName:
         ]
         records = [_record("array1"), _record("array1", id="id-other")]
 
-        module, result = _read(pure1_client, insights, records, keep_named=True)
+        module, result = _read(pure1_client, insights, records)
 
         assert result == {
             "arrays": {

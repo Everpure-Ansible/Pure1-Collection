@@ -2044,6 +2044,37 @@ class TestDocumentation:
 
         assert sentence in " ".join(options[option]["description"])
 
+    def test_total_is_null_when_pure1_reports_none(self, pure1_client):
+        """And RETURN says so"""
+        pure1_client.get_protection_group_snapshots.side_effect = paged_answers(
+            "ProtectionGroupSnapshotGetResponse",
+            [_snapshot("1"), _snapshot("2", CREATED - 1000)],
+            total_item_count=None,
+        )
+
+        result = _result(run_main(pure1_pgroup_snapshots, transfer=False))
+
+        assert result["total"] is None
+        assert result["returned"] == 2
+        assert result["truncated"] is False
+        keys = yaml.safe_load(pure1_pgroup_snapshots.RETURN)
+        total = keys["pure1_pgroup_snapshots"]["contains"]["total"]["description"]
+        assert "null when Pure1 does not report it." in " ".join(total).replace(
+            "\n", " "
+        )
+
+    def test_note_names_the_release_that_the_calls_came_with(self):
+        """It is no requirement below the py-pure-client the collection requires"""
+        notes = yaml.safe_load(pure1_pgroup_snapshots.DOCUMENTATION)["notes"]
+
+        (note,) = [note for note in notes if "py-pure-client" in note]
+        assert note.replace("\n", " ") == (
+            "The Pure1 REST 1.5 calls this module makes, "
+            "C(get_protection_group_snapshots) and "
+            "C(get_protection_group_snapshots_transfer), came with py-pure-client "
+            "1.78.0."
+        )
+
     def test_sample_is_shown_whole_by_ansible_doc(self):
         """ansible-doc takes "key: word::" out of a text, as a directive of RST."""
         returned = yaml.safe_load(pure1_pgroup_snapshots.RETURN)

@@ -14,7 +14,7 @@ module: pure1_recommendations
 version_added: '1.6.0'
 short_description: Collect the recommendations of Pure1
 description:
-  - Returns what Pure1 recommends for the arrays and subscriptions it knows.
+  - Collect what Pure1 recommends for the arrays and subscriptions it knows.
     These are hardware upgrades of FlashArrays, with the recommended model
     and the components at their end of life, upgrades of Evergreen//One
     subscription licenses, with the recommended service tier and reserve, and
@@ -55,9 +55,10 @@ options:
     type: list
     elements: str
 notes:
-  - The module uses the recommendation calls of Pure1 REST 1.6
-    (C(get_recommendations) and one call for each type), which need
-    C(py-pure-client) 1.99.0 or later.
+  - This module makes the Pure1 REST 1.6 calls C(get_recommendations),
+    C(get_recommendations_flasharray_hardware_upgrade),
+    C(get_recommendations_license_upgrade) and
+    C(get_recommendations_support_contract_renewal).
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -123,7 +124,7 @@ pure1_recommendations:
       elements: dict
       contains:
         id:
-          description: The id of the recommendation in Pure1.
+          description: The ID of the recommendation in Pure1.
           type: str
         name:
           description: The name that Pure1 gave the recommendation.
@@ -137,14 +138,14 @@ pure1_recommendations:
               C(flasharray-hardware-upgrade).
           type: str
         created:
-          description: The time the recommendation was made, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: The time the recommendation was made, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         created_epoch:
           description: The time the recommendation was made, in milliseconds since the epoch.
           type: int
         as_of:
           description:
-            - The time of the data that Pure1 holds of the recommendation, as
+            - The time of the data that Pure1 holds of the recommendation, in UTC, as
               C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
@@ -159,7 +160,7 @@ pure1_recommendations:
           type: dict
           contains:
             id:
-              description: The id of the target in Pure1.
+              description: The ID of the target in Pure1.
               type: str
             name:
               description: The name of the target.
@@ -180,7 +181,7 @@ pure1_recommendations:
           type: dict
           contains:
             id:
-              description: The id of the subscription license in Pure1.
+              description: The ID of the subscription license in Pure1.
               type: str
             name:
               description: The name of the subscription license.
@@ -229,7 +230,7 @@ pure1_recommendations:
               type: str
             end_of_life:
               description:
-                - The time of the end of life of the component, as
+                - The time of the end of life of the component, in UTC, as
                   C(YYYY-MM-DD HH:MM:SS UTC).
               type: str
             end_of_life_epoch:
@@ -248,7 +249,7 @@ pure1_recommendations:
       elements: dict
       contains:
         id:
-          description: The id of the recommendation in Pure1.
+          description: The ID of the recommendation in Pure1.
           type: str
         name:
           description: The name that Pure1 gave the recommendation.
@@ -262,14 +263,14 @@ pure1_recommendations:
               C(license-upgrade).
           type: str
         created:
-          description: The time the recommendation was made, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: The time the recommendation was made, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         created_epoch:
           description: The time the recommendation was made, in milliseconds since the epoch.
           type: int
         as_of:
           description:
-            - The time of the data that Pure1 holds of the recommendation, as
+            - The time of the data that Pure1 holds of the recommendation, in UTC, as
               C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
@@ -285,7 +286,7 @@ pure1_recommendations:
           type: dict
           contains:
             id:
-              description: The id of the target in Pure1.
+              description: The ID of the target in Pure1.
               type: str
             name:
               description: The name of the target.
@@ -306,7 +307,7 @@ pure1_recommendations:
           type: dict
           contains:
             id:
-              description: The id of the subscription license in Pure1.
+              description: The ID of the subscription license in Pure1.
               type: str
             name:
               description: The name of the subscription license.
@@ -364,7 +365,7 @@ pure1_recommendations:
       elements: dict
       contains:
         id:
-          description: The id of the recommendation in Pure1.
+          description: The ID of the recommendation in Pure1.
           type: str
         name:
           description: The name that Pure1 gave the recommendation.
@@ -378,14 +379,14 @@ pure1_recommendations:
               C(support-contract-renewal).
           type: str
         created:
-          description: The time the recommendation was made, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: The time the recommendation was made, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         created_epoch:
           description: The time the recommendation was made, in milliseconds since the epoch.
           type: int
         as_of:
           description:
-            - The time of the data that Pure1 holds of the recommendation, as
+            - The time of the data that Pure1 holds of the recommendation, in UTC, as
               C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
@@ -400,7 +401,7 @@ pure1_recommendations:
           type: dict
           contains:
             id:
-              description: The id of the target in Pure1.
+              description: The ID of the target in Pure1.
               type: str
             name:
               description: The name of the target.
@@ -421,7 +422,7 @@ pure1_recommendations:
           type: dict
           contains:
             id:
-              description: The id of the subscription license in Pure1.
+              description: The ID of the subscription license in Pure1.
               type: str
             name:
               description: The name of the subscription license.
@@ -449,7 +450,7 @@ pure1_recommendations:
               type: dict
               contains:
                 id:
-                  description: The id of the target in Pure1.
+                  description: The ID of the target in Pure1.
                   type: str
                 name:
                   description: The name of the target.
@@ -461,7 +462,7 @@ pure1_recommendations:
               description: The model of the target, where it is an appliance.
               type: str
             expires:
-              description: The time the support contract ends, as C(YYYY-MM-DD HH:MM:SS UTC).
+              description: The time the support contract ends, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
               type: str
             expires_epoch:
               description: The time the support contract ends, in milliseconds since the epoch.
@@ -480,7 +481,7 @@ pure1_recommendations:
       elements: dict
       contains:
         id:
-          description: The id of the recommendation in Pure1.
+          description: The ID of the recommendation in Pure1.
           type: str
         name:
           description: The name that Pure1 gave the recommendation.
@@ -492,14 +493,14 @@ pure1_recommendations:
           description: The type of the recommendation as Pure1 names it.
           type: str
         created:
-          description: The time the recommendation was made, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: The time the recommendation was made, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         created_epoch:
           description: The time the recommendation was made, in milliseconds since the epoch.
           type: int
         as_of:
           description:
-            - The time of the data that Pure1 holds of the recommendation, as
+            - The time of the data that Pure1 holds of the recommendation, in UTC, as
               C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
@@ -514,7 +515,7 @@ pure1_recommendations:
           type: dict
           contains:
             id:
-              description: The id of the target in Pure1.
+              description: The ID of the target in Pure1.
               type: str
             name:
               description: The name of the target.
@@ -535,7 +536,7 @@ pure1_recommendations:
           type: dict
           contains:
             id:
-              description: The id of the subscription license in Pure1.
+              description: The ID of the subscription license in Pure1.
               type: str
             name:
               description: The name of the subscription license.

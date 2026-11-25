@@ -29,18 +29,19 @@ options:
         replication. Only snapshots stored on one of them are returned.
       - Without it, or with an empty list, the snapshots stored on every
         array are returned.
-      - A name is matched whatever its case, and the result carries the name
-        as Pure1 spells it. A name Pure1 does not know fails the task.
+      - A name is matched without regard to case, and the result carries the
+        name as Pure1 spells it. A name that Pure1 does not know fails the
+        task.
       - Only the arrays that the names stand for are selected, which are
         told from every other array by their ID in Pure1. Another array
         whose name differs from one of them in case only is not selected.
-      - Costs one more request.
+      - Naming arrays costs one more request to Pure1.
     type: list
     elements: str
   source_array:
     description:
       - Name of the array the snapshots were replicated from, matched
-        whatever its case.
+        without regard to case. It takes one name.
       - It is read from the name of a snapshot, which is
         C(source_array:group.suffix). The snapshot of a protection group in a
         pod carries the name of the pod there and is not matched; select it
@@ -55,7 +56,8 @@ options:
   protection_group:
     description:
       - Names of protection groups as they are on the source array, C(group),
-        or C(pod::group) for a group in a pod, matched whatever their case.
+        or C(pod::group) for a group in a pod, matched without regard to
+        case.
       - Without it, or with an empty list, the snapshots of every protection
         group are returned.
       - A name on several source arrays selects the group of each of them.
@@ -97,29 +99,32 @@ options:
   transfer:
     description:
       - Return the statistics of the transfer of each snapshot.
-      - Costs one more request for every 1000 snapshots returned. With
+      - Costs one more request for every 1,000 snapshots returned. With
         I(latest_only) it is one for about every 40 snapshots.
     type: bool
     default: true
   limit:
     description:
       - The most snapshots to return, the newest first. Must be 0 or more.
-        Pure1 gives up to 1000 with one request, and an organization can hold
-        tens of thousands.
+        Pure1 gives up to 1,000 with one request, and an organization can
+        hold tens of thousands.
       - With C(0) no snapshot is returned, only C(total) and
         C(missing_protection_groups).
-      - Above 1000 the snapshots are read with several requests, and a
+      - Above 1,000 the snapshots are read with several requests, and a
         snapshot that Pure1 removes between two of them can leave another
         one out of the result.
     type: int
     default: 100
 notes:
-  - This module requires py-pure-client 1.78.0 or later, the first release
-    with the C(get_protection_group_snapshots) and
-    C(get_protection_group_snapshots_transfer) methods of the Pure1 client.
+  - The Pure1 REST 1.5 calls this module makes,
+    C(get_protection_group_snapshots) and
+    C(get_protection_group_snapshots_transfer), came with py-pure-client
+    1.78.0.
   - A snapshot created after the module started is not returned. That start
     time, I(window) and C(age_seconds) use the clock of the host the module
     runs on.
+seealso:
+  - module: everpure.pure1.pure1_replica_links
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -190,13 +195,14 @@ EXAMPLES = r"""
 
 RETURN = r"""
 pure1_pgroup_snapshots:
-  description: Returns the protection group snapshots collected from Pure1
+  description: The protection group snapshots collected from Pure1.
   returned: always
   type: dict
   contains:
     total:
       description:
-        - The number of snapshots in Pure1 that the options select.
+        - The number of snapshots in Pure1 that the options select, null
+          when Pure1 does not report it.
         - With I(latest_only) the number of newest snapshots found.
       type: int
     returned:
@@ -204,8 +210,11 @@ pure1_pgroup_snapshots:
       type: int
     truncated:
       description:
-        - Whether more snapshots are selected than are returned, because of
-          I(limit).
+        - Whether the module read fewer snapshots than the options select.
+          Either I(limit) cut the result, or the snapshots in Pure1 changed
+          while the module read them page by page.
+        - A snapshot that is left out of the result with a warning does not
+          make it true.
       type: bool
     missing_protection_groups:
       description:
@@ -223,7 +232,7 @@ pure1_pgroup_snapshots:
           the newest first, with the keys listed here.
         - A key is null when Pure1 reports no value for it.
         - Empty when no snapshot is returned.
-        - Where two arrays have one name, the array of the newest snapshot
+        - Where two arrays carry one name, the array of the newest snapshot
           keeps the name. The snapshots of the other one are left out, and
           the module gives a warning that counts them.
       type: dict
@@ -255,19 +264,19 @@ pure1_pgroup_snapshots:
           description: The part of the snapshot name after the protection group.
           type: str
         created:
-          description: When the snapshot was created, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: When the snapshot was created, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         created_epoch:
-          description: When the snapshot was created, in milliseconds since the UNIX epoch.
+          description: When the snapshot was created, in milliseconds since the epoch.
           type: int
         age_seconds:
           description: Whole seconds between the creation of the snapshot and the start of the module.
           type: int
         as_of:
-          description: When Pure1 last refreshed the snapshot, as C(YYYY-MM-DD HH:MM:SS UTC).
+          description: When Pure1 last refreshed the snapshot, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
           type: str
         as_of_epoch:
-          description: When Pure1 last refreshed the snapshot, in milliseconds since the UNIX epoch.
+          description: When Pure1 last refreshed the snapshot, in milliseconds since the epoch.
           type: int
         transfer:
           description:
@@ -277,18 +286,18 @@ pure1_pgroup_snapshots:
           type: dict
           contains:
             started:
-              description: When the transfer started, as C(YYYY-MM-DD HH:MM:SS UTC).
+              description: When the transfer started, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
               type: str
             started_epoch:
-              description: When the transfer started, in milliseconds since the UNIX epoch.
+              description: When the transfer started, in milliseconds since the epoch.
               type: int
             completed:
               description:
-                - When the transfer completed, as C(YYYY-MM-DD HH:MM:SS UTC).
+                - When the transfer completed, in UTC, as C(YYYY-MM-DD HH:MM:SS UTC).
                 - Null for a transfer that has not completed.
               type: str
             completed_epoch:
-              description: When the transfer completed, in milliseconds since the UNIX epoch.
+              description: When the transfer completed, in milliseconds since the epoch.
               type: int
             duration_seconds:
               description:
@@ -365,6 +374,8 @@ from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
     get_pure1,
     pure1_argument_spec,
     pure1_attr,
+    pure1_is_one_of,
+    pure1_keeps_name,
     pure1_list,
     pure1_require,
     pure1_resolve_arrays,
@@ -468,38 +479,6 @@ def array_term(arrays):
     if all(ids):
         return filter_in("on.id", ids)
     return filter_in("on.name", [array["name"] for array in arrays])
-
-
-def is_one_of(arrays, reference):
-    """Tell whether a reference to an array is to one of the arrays of the task
-
-    The id tells an array from another one of the same name, or of that
-    name in another case. Where Pure1 sent no id, the name must be the same
-    as Pure1 spells it.
-    """
-    reference_id = pure1_attr(reference, "id")
-    name = pure1_attr(reference, "name")
-    for array in arrays:
-        if reference_id is not None and array["id"] is not None:
-            if reference_id == array["id"]:
-                return True
-        elif name is not None and name == array["name"]:
-            return True
-    return False
-
-
-def keeps_name(owners, name, array_id):
-    """Tell whether an array is the one that has its name in the result
-
-    The result is keyed by array name and has one array under a name: the
-    array that is seen first keeps it, and owners holds its id by the name.
-    Arrays are told apart by their ids, so a reference without an id is
-    taken for the array that has the name.
-    """
-    owner = owners.setdefault(name, array_id)
-    if owner is None:
-        owners[name] = array_id
-    return owner is None or array_id is None or owner == array_id
 
 
 def id_chunks(ids):
@@ -734,9 +713,11 @@ def file_snapshots(module, snapshots, transfers, now, arrays):
         if array is None or pure1_attr(snapshot, "name") is None:
             left_out += 1
             continue
-        if arrays is not None and not is_one_of(arrays, pure1_attr(snapshot, "on")):
+        if arrays is not None and not pure1_is_one_of(
+            arrays, pure1_attr(snapshot, "on")
+        ):
             continue
-        if not keeps_name(owners, array, pure1_attr(snapshot, "on.id")):
+        if not pure1_keeps_name(owners, array, pure1_attr(snapshot, "on.id")):
             other_array += 1
             continue
         transfer = transfers.get(pure1_attr(snapshot, "id"))

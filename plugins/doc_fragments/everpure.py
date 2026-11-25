@@ -59,6 +59,13 @@ notes:
   - When the C(PURE1_ID_TOKEN) environment variable is set, C(py-pure-client) authenticates
     with that ID token and ignores I(app_id), I(key_file) and I(password), although
     I(app_id) and I(key_file) must still be set
+  - Ansible replaces the value of I(app_id) and of I(password) wherever it occurs inside a
+    value that a module returns. A returned text that contains such a value, for example
+    the name of a user or of a volume, shows C(********) in its place, and a returned value
+    that is equal to one is returned as C(VALUE_SPECIFIED_IN_NO_LOG_PARAMETER).
+  - Pure1 refuses a request that is too long, and the task then fails. About 200 names of
+    20 characters fit into one request, and fewer when the names are longer or when IDs
+    are given. Give more names in several tasks.
 requirements:
   - python >= 3.9
   - py-pure-client >= 1.99.0

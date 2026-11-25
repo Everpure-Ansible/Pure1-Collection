@@ -1456,8 +1456,23 @@ class TestDocumentation:
         text = " ".join(options[option]["description"]).replace("\n", " ")
 
         assert (
-            "Mutually exclusive with I({0}), also when it is empty.".format(partner)
-            in text
+            "Mutually exclusive with I({0}). A task that gives both options "
+            "fails, also when I({1}) is an empty list.".format(partner, option) in text
+        )
+
+    @pytest.mark.parametrize(
+        "option, partner",
+        [("user", "exclude_users"), ("subcommand_contains", "subcommand")],
+        ids=["user", "subcommand_contains"],
+    )
+    def test_documentation_of_the_other_option_says_the_same(self, option, partner):
+        """Each of two options that exclude each other says so"""
+        options = yaml.safe_load(pure1_audits.DOCUMENTATION)["options"]
+        text = " ".join(options[option]["description"]).replace("\n", " ")
+
+        assert (
+            "Mutually exclusive with I({0}). A task that gives both options "
+            "fails, also when I({0}) is an empty list.".format(partner) in text
         )
 
     @pytest.mark.parametrize(

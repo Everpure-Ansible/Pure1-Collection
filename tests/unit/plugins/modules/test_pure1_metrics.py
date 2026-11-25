@@ -111,19 +111,21 @@ NO_DATA = (
     "points with."
 )
 NOT_OF_THE_TASK = (
-    "Pure1 returned {0} series that are of no resource and metric of the task: "
-    "they are left out of the result."
+    "Series that Pure1 returned for no resource and metric of the task are left "
+    "out of the result: {0}."
 )
 SAME_NAME = (
-    "Pure1 returned {0} series for another array of the same name in one pod: "
-    "they are left out of the result."
+    "Series that Pure1 returned for another array of the same name in one pod "
+    "are left out of the result: {0}."
 )
+# The two warnings that name a kind of resource start with it: "Volumes", "File
+# systems"
 GONE = (
-    "Pure1 no longer knows {0} of the {1} it listed: they are named in skipped "
-    "and are not in resources."
+    "{0} that Pure1 listed and no longer knows are named in skipped and are not "
+    "in resources: {1}."
 )
-NO_ID = "Pure1 returned {0} {1} without an ID: they are left out of the result."
-NO_NAME = "Pure1 returned {0} metrics without a name: they are left out of the result."
+NO_ID = "{0} that Pure1 returned without an ID are left out of the result: {1}."
+NO_NAME = "Metrics that Pure1 returned without a name are left out of the result: {0}."
 INCOMPLETE = "Pure1 returned {0} of {1} {2}: the result may be incomplete."
 TOO_MANY = (
     "The task needs {0} series (volumes: {1}, metrics: {2}), more than max_series "
@@ -132,7 +134,7 @@ TOO_MANY = (
 # What a listing without name and ids asks for at most: one resource more than
 # the default of max_series allows for one metric
 LIMIT = 3201
-TOO_LONG = "The request is too long for Pure1: give fewer names in one task."
+TOO_LONG = "The request is too long for Pure1: give fewer names or IDs in one task."
 
 
 @pytest.fixture(autouse=True)
@@ -1208,6 +1210,28 @@ class TestSelection:
 
         assert _failure(module) == "parameters are mutually exclusive: name|ids"
 
+    @pytest.mark.parametrize(
+        "name, ids",
+        [
+            pytest.param([], ["volume-id-1"], id="name empty"),
+            pytest.param(["volume1"], [], id="ids empty"),
+            pytest.param([], [], id="both empty"),
+        ],
+    )
+    def test_name_and_ids_exclude_each_other_also_when_one_is_empty(
+        self, pure1_client, name, ids
+    ):
+        """An empty list is given too, and the description of each option says so"""
+        module = _run(pure1_client, name=name, ids=ids, metrics=["volume_space"])
+
+        assert _failure(module) == "parameters are mutually exclusive: name|ids"
+        options = yaml.safe_load(pure1_metrics.DOCUMENTATION)["options"]
+        for option, other in (("name", "ids"), ("ids", "name")):
+            assert (
+                "Mutually exclusive with I({0}). A task that gives both options "
+                "fails, also when one of them is an empty list.".format(other)
+            ) in " ".join(" ".join(options[option]["description"]).split())
+
     @pytest.mark.parametrize("option", ["name", "ids", "array"])
     def test_empty_list_counts_as_not_set(self, pure1_client, option):
         module = _run(
@@ -1225,7 +1249,11 @@ class TestSelection:
     @pytest.mark.parametrize(
         "option, said",
         [
-            ("name", "when neither I(name) nor I(ids) is set or when they are empty"),
+            (
+                "name",
+                "when neither I(name) nor I(ids) is set, or the one that is given "
+                "is empty",
+            ),
             ("ids", "An empty list counts as not set."),
             ("array", "are selected when it is not set or empty."),
             ("metrics", "an empty list counts as not set."),
@@ -1392,7 +1420,7 @@ class TestSelection:
         )
 
         assert list(_result(module)["resources"]) == ["array-id-2"]
-        assert _warnings(module) == [NO_ID.format(1, "arrays")]
+        assert _warnings(module) == [NO_ID.format("Arrays", 1)]
         assert pure1_client.get_metrics_history.call_args_list == [
             _history_call(["array_space"], ["array-id-2"])
         ]
@@ -1546,7 +1574,8 @@ class TestListedResources:
         )
 
         assert list(_result(module)["resources"]) == [prefix + "-id-1"]
-        assert _warnings(module) == [NO_ID.format(2, KIND[resource_type])]
+        # "File systems that Pure1 returned ...": the kind starts the sentence
+        assert _warnings(module) == [NO_ID.format(KIND[resource_type].capitalize(), 2)]
         (request,) = pure1_client.get_metrics_history.call_args_list
         assert request[1]["resource_ids"] == [prefix + "-id-1"]
 
@@ -2361,7 +2390,7 @@ class TestMaxSeries:
                     _listed(number=2),
                     sdk_model("Volume", name="x2"),
                 ],
-                [NO_ID.format(2, "volumes"), NO_DATA],
+                [NO_ID.format("Volumes", 2), NO_DATA],
                 id="without an ID",
             ),
             pytest.param(
@@ -2525,7 +2554,7 @@ class TestResourcesThatWentAway:
                 "skipped": ["volume-id-2"],
             },
         )
-        assert _warnings(module) == [GONE.format(1, "volumes")]
+        assert _warnings(module) == [GONE.format("Volumes", 1)]
         # the others are asked for again
         assert pure1_client.get_metrics_history.call_args_list == [
             _history_call(
@@ -2550,7 +2579,7 @@ class TestResourcesThatWentAway:
         result = _result(module)
         assert list(result["resources"]) == ["volume-id-2"]
         assert result["skipped"] == ["volume-id-1"]
-        assert _warnings(module) == [GONE.format(1, "volumes")]
+        assert _warnings(module) == [GONE.format("Volumes", 1)]
 
     def test_every_resource_of_a_request_gone_asks_for_nothing_again(
         self, pure1_client
@@ -2568,7 +2597,7 @@ class TestResourcesThatWentAway:
             "skipped": ["volume-id-1", "volume-id-2"],
         }
         # no resource is left: no warning that there is no data point
-        assert _warnings(module) == [GONE.format(2, "volumes")]
+        assert _warnings(module) == [GONE.format("Volumes", 2)]
         pure1_client.get_metrics_history.assert_called_once()
 
     def test_answer_that_names_them_one_after_the_other(self, pure1_client):
@@ -2618,7 +2647,7 @@ class TestResourcesThatWentAway:
         result = _result(module)
         assert list(result["resources"]) == ["pod-id-2"]
         assert result["skipped"] == ["pod-id-1"]
-        assert _warnings(module) == [GONE.format(1, "pods")]
+        assert _warnings(module) == [GONE.format("Pods", 1)]
         assert pure1_client.get_metrics_history.call_args_list == [
             _history_call(["pod_space"], ["pod-id-1", "pod-id-2"]),
             _history_call(["pod_space"], ["pod-id-2"]),
@@ -2644,7 +2673,7 @@ class TestResourcesThatWentAway:
         result = _result(module)
         assert list(result["resources"]) == ["vol-1", "vol-100", "vol.5"]
         assert result["skipped"] == ["vol-10", "xvol-100", "volx5"]
-        assert _warnings(module) == [GONE.format(3, "volumes")]
+        assert _warnings(module) == [GONE.format("Volumes", 3)]
         # the others are asked for again
         assert pure1_client.get_metrics_history.call_args_list == [
             _history_call(["volume_space"], ids),
@@ -2726,6 +2755,130 @@ class TestResourcesThatWentAway:
             "volume-id-1 has no metrics"
         )
         pure1_client.get_metrics_history.assert_called_once()
+
+
+class TestSeriesThatCameShort:
+    """An answer to get_metrics_history with fewer series than Pure1 counted."""
+
+    def test_answer_with_fewer_series_than_its_total_gives_a_warning(
+        self, pure1_client
+    ):
+        module = _run(
+            pure1_client,
+            listed=[_listed(), _listed(number=2)],
+            series=[valid_response([_series("volume_space")], total_item_count=2)],
+            metrics=["volume_space"],
+        )
+
+        assert _result(module)["resources"] == {
+            "volume-id-1": _row(metrics={"volume_space": _metric_row(**POINT)}),
+            "volume-id-2": _row(number=2, metrics={"volume_space": _metric_row()}),
+        }
+        assert _warnings(module) == [INCOMPLETE.format(1, 2, "metric series")]
+        # the call takes no paging keyword: nothing is asked for a second time
+        assert pure1_client.get_metrics_history.call_args_list == [
+            _history_call(["volume_space"], ["volume-id-1", "volume-id-2"])
+        ]
+
+    def test_series_of_all_requests_are_counted_in_one_warning(self, pure1_client):
+        """33 volumes take two requests, and the answer to the first is short"""
+        listed = [_listed(number=number) for number in range(1, 34)]
+        first = [
+            _series("volume_space", "volume-id-{0}".format(number))
+            for number in range(1, 32)
+        ]
+        module = _run(
+            pure1_client,
+            listed=listed,
+            series=[
+                valid_response(first, total_item_count=32),
+                [_series("volume_space", "volume-id-33")],
+            ],
+            metrics=["volume_space"],
+        )
+
+        assert len(_result(module)["resources"]) == 33
+        assert _warnings(module) == [INCOMPLETE.format(32, 33, "metric series")]
+        assert pure1_client.get_metrics_history.call_args_list == [
+            _history_call(
+                ["volume_space"],
+                ["volume-id-{0}".format(number) for number in range(1, 33)],
+            ),
+            _history_call(["volume_space"], ["volume-id-33"]),
+        ]
+
+    def test_answer_without_a_total_gives_a_warning(self, pure1_client):
+        """Nothing tells whether Pure1 has more series than it sent"""
+        answers = paged_answers(
+            "MetricHistoryGetResponse", [_series("volume_space")], total_item_count=None
+        )
+        pure1_client.get_metrics.return_value = valid_response(_catalog("volumes"))
+        pure1_client.get_volumes.return_value = valid_response([_listed()])
+        pure1_client.get_metrics_history.side_effect = answers
+
+        module = run_main(
+            pure1_metrics, resource_type="volumes", metrics=["volume_space"]
+        )
+
+        assert _result(module)["resources"] == {
+            "volume-id-1": _row(metrics={"volume_space": _metric_row(**POINT)})
+        }
+        assert _warnings(module) == [
+            INCOMPLETE.format(1, "an unknown number of", "metric series")
+        ]
+        assert answers.requests == [
+            {
+                "aggregation": "avg",
+                "end_time": END,
+                "resolution": DAY,
+                "start_time": START,
+                "names": ["volume_space"],
+                "resource_ids": ["volume-id-1"],
+            }
+        ]
+
+    def test_answer_with_more_series_than_its_total_is_read_whole(self, pure1_client):
+        module = _run(
+            pure1_client,
+            listed=[_listed(), _listed(number=2)],
+            series=[
+                valid_response(
+                    [_series("volume_space"), _series("volume_space", "volume-id-2")],
+                    total_item_count=1,
+                )
+            ],
+            metrics=["volume_space"],
+        )
+
+        assert _result(module)["resources"] == {
+            "volume-id-1": _row(metrics={"volume_space": _metric_row(**POINT)}),
+            "volume-id-2": _row(
+                number=2, metrics={"volume_space": _metric_row(**POINT)}
+            ),
+        }
+        module.warn.assert_not_called()
+
+    def test_warning_comes_before_the_one_for_a_resource_that_went_away(
+        self, pure1_client
+    ):
+        module = _run(
+            pure1_client,
+            listed=[_listed(), _listed(number=2), _listed(number=3)],
+            series=[
+                _not_found("volume-id-2"),
+                valid_response([_series("volume_space")], total_item_count=2),
+            ],
+            metrics=["volume_space"],
+        )
+
+        result = _result(module)
+        assert list(result["resources"]) == ["volume-id-1", "volume-id-3"]
+        assert result["skipped"] == ["volume-id-2"]
+        # the answer that was refused counts no series
+        assert _warnings(module) == [
+            INCOMPLETE.format(1, 2, "metric series"),
+            GONE.format("Volumes", 1),
+        ]
 
 
 class TestFailedRequests:

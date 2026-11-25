@@ -35,6 +35,8 @@ fleet and the fleet reference on the array, and the two can differ. The same
 holds for the topology group of an array. pure1_fleet_map() is the one rule
 for both, pure1_tag_map() lists the tags of every array and
 pure1_array_record() describes one array with what the two found.
+pure1_list_arrays() lists the arrays that the rule joins the members to, and
+pure1_resolve_fleets() finds the fleets that a task names.
 """
 
 from __future__ import absolute_import, division, print_function
@@ -424,6 +426,83 @@ def _sorted(mapping):
     return {key: mapping[key] for key in sorted(mapping)}
 
 
+def pure1_list_arrays(module, request):
+    """Return every array of Pure1 by its name, as the SDK models
+
+    request is the function of the caller that makes the unfiltered
+    get_arrays call and hands the paging keywords on, as pure1_list() takes
+    it, so that the client call stays written out in the module:
+
+        def all_arrays(**page):
+            return pure_1.get_arrays(**page)
+
+        arrays = pure1_list_arrays(module, all_arrays)
+
+    The arrays are in the order Pure1 lists them, and list() of the values
+    is what pure1_fleet_map() takes as arrays. A listing of which Pure1 gave
+    fewer arrays than it counted gives one warning. An array without a name,
+    and one with the name of an array before it, cannot be filed and is
+    counted in one warning after that. A failed request fails the task with
+    the line of the shared helpers.
+    """
+    by_name, left_out = _arrays_by_name(
+        _listing(module, "get_arrays", request, "arrays")
+    )
+    _left_out(
+        module,
+        "Arrays that Pure1 returned without a name or with the name of "
+        "another array",
+        left_out,
+    )
+    return by_name
+
+
+def pure1_resolve_fleets(module, fleets, names):
+    """Return the names of the fleets a task names, as Pure1 spells them
+
+    fleets are the names of the fleets Pure1 knows, as a list or as the
+    fleets of pure1_fleet_map(), and names are the names of the task: the
+    value of an option of type list with elements str, or the one name of
+    an option of type str in a list. None when names is None or empty, else
+    the names in the order of the task, each fleet once. No request is made.
+
+    A name is matched without regard to case, as Pure1 itself compares the
+    names of fleets, and the spelling of the task wins over the same name in
+    another case. An empty name fails the task ("The name of a fleet must
+    not be empty."), and so does a name that matches no fleet ("Fleet foo is
+    not known to Pure1.", "Fleets foo, Bar are not known to Pure1.") and a
+    name that matches more than one fleet in another case and none as the
+    task spells it.
+    """
+    if not names:
+        return None
+    if not all(name.strip() for name in names):
+        module.fail_json(msg="The name of a fleet must not be empty.")
+    known = {}
+    for fleet in fleets:
+        known.setdefault(fleet.lower(), []).append(fleet)
+    found = []
+    unknown = []
+    for name in names:
+        matches = known.get(name.lower(), [])
+        if name in matches:
+            matches = [name]
+        if len(matches) > 1:
+            module.fail_json(
+                msg="Pure1 knows more than one fleet whose name is {0} in another "
+                "case: {1}. Give the name as Pure1 spells it.".format(
+                    name, ", ".join(sorted(matches))
+                )
+            )
+        if not matches and name not in unknown:
+            unknown.append(name)
+        found.extend(fleet for fleet in matches if fleet not in found)
+    if unknown:
+        text = "Fleet {0} is" if len(unknown) == 1 else "Fleets {0} are"
+        module.fail_json(msg=(text + " not known to Pure1.").format(", ".join(unknown)))
+    return found
+
+
 def pure1_fleet_map(module, pure_1, arrays=None, topology=True):
     """Return the fleet and the topology group of every array, by one rule
 
@@ -445,10 +524,10 @@ def pure1_fleet_map(module, pure_1, arrays=None, topology=True):
 
     Requests, all unfiltered and through pure1_list(): get_arrays (unless
     arrays is given), get_fleets, get_fleets_members and, with topology,
-    get_topology_groups and get_topology_groups_members. get_fleets needs
-    py-pure-client 1.93.0 and the three after it 1.99.0: the module checks
-    for them with pure1_require() before it calls this. A failed request
-    fails the task with the line of the shared helpers.
+    get_topology_groups and get_topology_groups_members. get_fleets came
+    with py-pure-client 1.93.0 and the three after it with 1.99.0: the
+    module checks for them with pure1_require() before it calls this. A
+    failed request fails the task with the line of the shared helpers.
 
     The result has four keys, each always there, every dictionary in the
     order of its keys:
@@ -528,17 +607,10 @@ def pure1_fleet_map(module, pure_1, arrays=None, topology=True):
     def all_group_members(**page):
         return pure_1.get_topology_groups_members(**page)
 
-    listed = arrays is None
-    if listed:
-        arrays = _listing(module, "get_arrays", all_arrays, "arrays")
-    by_name, left_out = _arrays_by_name(arrays)
-    if listed:
-        _left_out(
-            module,
-            "Arrays that Pure1 returned without a name or with the name of "
-            "another array",
-            left_out,
-        )
+    if arrays is None:
+        by_name = pure1_list_arrays(module, all_arrays)
+    else:
+        by_name = _arrays_by_name(arrays)[0]
     fleets = {}
     _left_out(
         module,

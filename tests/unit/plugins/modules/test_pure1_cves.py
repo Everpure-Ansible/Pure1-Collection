@@ -54,8 +54,8 @@ NO_RELEASES = {FA: [], FB: []}
 EMPTY = {"total": 0, "returned": 0, "truncated": False, "cves": {}}
 NO_ID = "CVEs that Pure1 returned without an id are left out of the result: {0}."
 SAME_ID = (
-    "Pure1 returned {0} CVEs under the id of another CVE: of each such id only "
-    "the CVE returned first is in the result."
+    "CVEs that Pure1 returned under the id of another CVE are left out of the "
+    "result, which keeps the CVE returned first: {0}."
 )
 NO_RECORD = (
     "CVEs that the security insights report and Pure1 has no record of are left "
@@ -2251,7 +2251,7 @@ class TestDocumentation:
             set(keys["contains"]) - set(result["pure1_cves"]["cves"][CVE1]) == sometimes
         )
         assert keys["contains"]["affected_versions"]["returned"] == (
-            "when I(include_affected_versions) is C(true)"
+            "when I(include_affected_versions) is true"
         )
 
     def test_every_key_of_return_is_an_identifier(self):
@@ -2441,7 +2441,14 @@ class TestDocumentation:
     def test_notes_name_the_release_and_the_methods_the_module_needs(self):
         first, second, third = yaml.safe_load(pure1_cves.DOCUMENTATION)["notes"]
 
-        assert "py-pure-client 1.91.0 or later" in first
+        # what came with a release, not a requirement below that of the
+        # collection
+        assert first == (
+            "The Pure1 REST 1.5 calls this module makes, C({0}) and C({1}), came "
+            "with py-pure-client 1.91.0.".format(
+                *[method for method, minimum in pure1_cves.REQUIRED_METHODS]
+            )
+        )
         for method, minimum in pure1_cves.REQUIRED_METHODS:
             assert "C({0})".format(method) in first
             assert minimum == "1.91.0"
