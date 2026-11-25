@@ -37,7 +37,7 @@ EXAMPLES = r"""
   ansible.builtin.debug:
     msg: "{{ pure1_volumes['pure1_volumes']['serial_numbers'] }}"
 
-- name: Show the Pure1 ID (NAID) of every volume
+- name: Show the Pure1 ID (UUID) of every volume
   ansible.builtin.debug:
     msg: "{{ item.value.name }} = {{ item.value.id }}"
   loop: "{{ pure1_volumes['pure1_volumes']['serial_numbers'] | dict2items }}"
@@ -64,7 +64,7 @@ pure1_volumes:
       contains:
         id:
           description:
-            - The globally unique Pure1 ID (NAID) of the volume
+            - The globally unique Pure1 ID (UUID) of the volume
             - Added in version 1.6.0.
           type: str
         name:
