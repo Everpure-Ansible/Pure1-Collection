@@ -7,6 +7,8 @@ from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
+import re
+
 import jinja2
 import pytest
 import yaml
@@ -1538,27 +1540,31 @@ class TestPure1BucketsMain:
         [
             pytest.param(
                 {"destroyed": "perhaps"},
-                "argument 'destroyed' is of type <class 'str'> and we were unable "
-                "to convert to bool: The value 'perhaps' is not a valid boolean.",
+                # ansible-core names the type as <class 'str'> up to 2.18 and
+                # as str from 2.19 on
+                r"argument 'destroyed' is of type (<class 'str'>|str) and we were unable "
+                r"to convert to bool: The value 'perhaps' is not a valid boolean\.",
                 id="destroyed is no boolean",
             ),
             pytest.param(
                 {"array": {"name": "array1"}},
-                "argument 'array' is of type <class 'dict'> and we were unable to "
-                "convert to list: <class 'dict'> cannot be converted to a list",
+                r"argument 'array' is of type (<class 'dict'>|dict) and we were unable to "
+                r"convert to list: ",
                 id="array is a dictionary",
             ),
             pytest.param(
                 {"filter": "name='bucket1'"},
-                "Unsupported parameters for module: filter.",
+                r"Unsupported parameters for module: filter\.",
                 id="no filter option",
             ),
             pytest.param(
-                {"limit": 5}, "Unsupported parameters for module: limit.", id="no limit"
+                {"limit": 5},
+                r"Unsupported parameters for module: limit\.",
+                id="no limit",
             ),
             pytest.param(
                 {"buckets": ["bucket1"]},
-                "Unsupported parameters for module: buckets.",
+                r"Unsupported parameters for module: buckets\.",
                 id="the buckets are named with name",
             ),
         ],
@@ -1569,7 +1575,7 @@ class TestPure1BucketsMain:
         module = run_main(pure1_buckets, **params)
 
         module.fail_json.assert_called_once()
-        assert module.fail_json.call_args[1]["msg"].startswith(message)
+        assert re.match(message, module.fail_json.call_args[1]["msg"])
         module.exit_json.assert_not_called()
         pure1_client.get_arrays.assert_not_called()
         pure1_client.get_buckets.assert_not_called()

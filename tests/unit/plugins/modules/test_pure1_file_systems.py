@@ -555,9 +555,12 @@ class TestOptions:
         module = _run(pure1_client, [], **{option: "maybe"})
 
         message = module.fail_json.call_args[1]["msg"]
-        assert message.startswith(
-            "argument '{0}' is of type <class 'str'> and we were unable to "
-            "convert to bool: The value 'maybe' is not a valid boolean.".format(option)
+        # ansible-core names the type as <class 'str'> up to 2.18 and as str
+        # from 2.19 on
+        assert message.startswith("argument '{0}' is of type ".format(option))
+        assert (
+            " and we were unable to convert to bool: "
+            "The value 'maybe' is not a valid boolean." in message
         )
         pure1_client.get_file_systems.assert_not_called()
 
