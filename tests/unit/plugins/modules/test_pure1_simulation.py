@@ -3,16 +3,22 @@
 
 """Unit tests for the pure1_simulation module.
 
-Pure1 was never asked for a simulation while the module was written: the
-request is a POST. The answers of these tests are built by the client code of
-the SDK from its response models, and in TestThroughTheSdk from a JSON
-document in the names of the REST reference, which the SDK itself reads.
+No test asks Pure1 for a simulation: the request is a POST. The answers of
+these tests are built by the client code of the SDK from its response models,
+and in TestThroughTheSdk from a JSON document in the names of the REST
+reference, which the SDK itself reads. The module was run against Pure1 on
+2026-11-25, and what Pure1 did then is pinned where a test says so: the REST
+version that takes the request, the limit of ten arrays, the text of a
+refusal that names an array by its id, and the shape of a projection (an
+empty unit, fractions, daily points).
 """
 
 from __future__ import absolute_import, division, print_function
 
 __metaclass__ = type
 
+import importlib
+import inspect
 import json
 import types
 
@@ -25,11 +31,12 @@ from pypureclient import ErrorResponse, PureError, ValidResponse
 from pypureclient._transport.api_response import ApiResponse
 from pypureclient._transport.configuration import Configuration
 
-from plugins.module_utils.pure1 import pure1_time
+from plugins.module_utils.pure1 import Pure1RequestError, pure1_response, pure1_time
 from plugins.modules import pure1_simulation
 from tests.unit.conftest import (
     MODELS,
     NEWEST,
+    ansible_module,
     array_reference,
     error_response,
     run_main,
@@ -37,6 +44,12 @@ from tests.unit.conftest import (
     valid_response,
 )
 
+# The package of the SDK for the Pure1 REST version the module asks through,
+# and its models: the client of main() is of that package
+PINNED = importlib.import_module(
+    "pypureclient.pure1.Pure1_" + pure1_simulation.REST_VERSION.replace(".", "_")
+)
+PINNED_MODELS = importlib.import_module(PINNED.__name__ + ".models")
 DAY = 86400000
 # 2026-11-24 00:00:00 UTC, and a time of that day as time.time() gives it
 MIDNIGHT = 1795478400000
@@ -146,8 +159,24 @@ DEFAULT_REQUEST = {
     "projection_end_time_epoch": None,
     "training_start_time": None,
     "training_start_time_epoch": None,
-    "resolution": None,
 }
+# Made-up ids in the form of those Pure1 gives an array
+ARRAY1_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+ARRAY2_ID = "5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9"
+OTHER_ID = "9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a"
+# What Pure1 answered for an array that it did not project (2026-11-25), with
+# the id of the array where {0} stands
+NOT_SUPPORTED = (
+    "Cannot compute projection for array {0}: array or requested "
+    "configuration is not supported."
+)
+TOO_LITTLE_HISTORY = (
+    "Cannot compute projection for array {0}: insufficient historical data "
+    "available."
+)
+# and for a request that names more than ten arrays
+TOO_MANY_ARRAYS = "Planning simulation resources list must contain at most 10 entries"
+FAILED = "Pure1 request post_arrays_simulations failed (HTTP 400): Invalid value: "
 
 
 @pytest.fixture(autouse=True)
@@ -317,7 +346,6 @@ class TestPure1SimulationMain:
                     "projection_end_time_epoch": None,
                     "training_start_time": None,
                     "training_start_time_epoch": None,
-                    "resolution": None,
                 },
                 "arrays": {
                     "array1": {
@@ -344,7 +372,6 @@ class TestPure1SimulationMain:
             aggregation="average",
             projection_days=30,
             training_days=60,
-            resolution=3600000,
         )
 
         module.warn.assert_not_called()
@@ -358,7 +385,6 @@ class TestPure1SimulationMain:
                     "projection_end_time_epoch": 1798070400000,
                     "training_start_time": "2026-09-25 00:00:00 UTC",
                     "training_start_time_epoch": 1790294400000,
-                    "resolution": 3600000,
                 },
                 "arrays": {
                     "array1": _array_row(
@@ -536,26 +562,16 @@ class TestRequestBody:
                 id="both periods",
             ),
             pytest.param(
-                {"resolution": 3600000},
-                {"metrics": BOTH, "resolution": 3600000},
-                id="resolution",
-            ),
-            pytest.param(
-                {"resolution": 1}, {"metrics": BOTH, "resolution": 1}, id="resolution 1"
-            ),
-            pytest.param(
                 {
                     "metrics": ["projected_load"],
                     "aggregation": "average",
                     "projection_days": 30,
                     "training_days": 60,
-                    "resolution": 604800000,
                 },
                 {
                     "metrics": [{"name": "projected_load", "aggregation": "average"}],
                     "projection_end_time": 1798070400000,
                     "training_start_time": 1790294400000,
-                    "resolution": 604800000,
                 },
                 id="every option",
             ),
@@ -569,7 +585,8 @@ class TestRequestBody:
         module.warn.assert_not_called()
         # the SDK model of the request takes every field as it is: no field
         # is unknown to it, none has another type, and none is changed
-        assert MODELS.PlanningSimulationPost(**body).as_request_dict() == body
+        for models in (PINNED_MODELS, MODELS):
+            assert models.PlanningSimulationPost(**body).as_request_dict() == body
         # and the body is a document that can be sent
         assert json.loads(json.dumps(body)) == body
         # whatever the options, two requests after the check of get_pure1
@@ -586,31 +603,34 @@ class TestRequestBody:
             aggregation="average",
             projection_days=30,
             training_days=60,
-            resolution=3600000,
         )
 
         body = _body(pure1_client)
-        request = MODELS.PlanningSimulationPost.__fields__
+        request = PINNED_MODELS.PlanningSimulationPost.__fields__
         assert set(body) == set(request) - {
             # no what-if step in this release, and Pure1 starts the
             # projection and ends the history at the last midnight itself
             "steps",
             "projection_start_time",
             "training_end_time",
+            # Pure1 takes one day only, which it uses when none is sent
+            "resolution",
         }
-        for name in ("projection_end_time", "training_start_time", "resolution"):
+        for name in ("projection_end_time", "training_start_time"):
             assert request[name].type_.__name__ == "StrictInt"
             # an int and no bool, which StrictInt refuses
             assert {type(body[name])} == {int}
-        assert request["resources"].type_ is MODELS.PlanningSimulationArrayReference
+        assert (
+            request["resources"].type_ is PINNED_MODELS.PlanningSimulationArrayReference
+        )
         assert set(body["resources"][0]) == {"name"}
-        assert set(MODELS.PlanningSimulationArrayReference.__fields__) == {
+        assert set(PINNED_MODELS.PlanningSimulationArrayReference.__fields__) == {
             "id",
             "name",
         }
-        assert request["metrics"].type_ is MODELS.PlanningSimulationMetricRequest
+        assert request["metrics"].type_ is PINNED_MODELS.PlanningSimulationMetricRequest
         assert set(body["metrics"][0]) == set(
-            MODELS.PlanningSimulationMetricRequest.__fields__
+            PINNED_MODELS.PlanningSimulationMetricRequest.__fields__
         )
 
     def test_aggregation_without_the_load_is_not_sent(self, pure1_client):
@@ -711,22 +731,17 @@ class TestRequestBody:
         assert request["training_start_time"] == "1926-12-19 00:00:00 UTC"
         assert request["training_start_time_epoch"] == -1358121600000
 
-    def test_resolution_has_no_upper_bound(self, pure1_client):
-        """It is sent as a number and never shown as a time"""
-        module = _run(pure1_client, resolution=10**15)
-
-        assert _body(pure1_client)["resolution"] == 10**15
-        assert _result(module)["request"]["resolution"] == 10**15
-
     def test_clock_is_not_read_without_a_period(self, pure1_client, clock):
         clock.time = None
 
-        _run(pure1_client, resolution=3600000)
+        _run(pure1_client, aggregation="average")
 
         assert _body(pure1_client) == {
             "resources": [{"name": "array1"}],
-            "metrics": BOTH,
-            "resolution": 3600000,
+            "metrics": [
+                {"name": "projected_load", "aggregation": "average"},
+                {"name": "projected_capacity"},
+            ],
         }
 
 
@@ -760,6 +775,150 @@ class TestRequests:
             "get_arrays": 2,
             "post_arrays_simulations": 1,
         }
+
+    def test_client_is_created_for_pure1_rest_1_6(self, pure1_client, client_factory):
+        """Pure1 refused the request on the path of REST 1.7 and answered it
+        on that of REST 1.6 (2026-11-25), whatever py-pure-client has as its
+        newest version"""
+        module = _run(pure1_client, [_load()])
+
+        module.fail_json.assert_not_called()
+        client_factory.assert_called_once()
+        assert client_factory.call_args[0] == ()
+        arguments = client_factory.call_args[1]
+        assert arguments["version"] == "1.6"
+        assert set(arguments) == {
+            "version",
+            "app_id",
+            "private_key_file",
+            "configuration",
+        }
+        assert pure1_simulation.REST_VERSION == "1.6"
+
+    def test_client_of_pure1_rest_1_6_has_the_calls_and_the_models(self):
+        """The stand-in of these tests has the signatures of the newest
+        client of py-pure-client and answers with its models: the client
+        that main() gets takes the calls as the module makes them, and its
+        models have the fields that the module sends and reads"""
+        assert PINNED.__name__ == "pypureclient.pure1.Pure1_1_6"
+        simulate = inspect.signature(PINNED.Client.post_arrays_simulations).parameters
+        assert list(simulate)[:2] == ["self", "planning_simulation_post"]
+        assert {"filter", "limit"} <= set(
+            inspect.signature(PINNED.Client.get_arrays).parameters
+        )
+        fields = {
+            model: set(getattr(PINNED_MODELS, model).__fields__)
+            for model in (
+                "PlanningSimulationPost",
+                "PlanningSimulationArrayReference",
+                "PlanningSimulationMetricRequest",
+                "PlanningSimulationResponse",
+                "PlanningSimulationMetric",
+                "FixedReferenceFqdn",
+            )
+        }
+        assert fields == {
+            "PlanningSimulationPost": {
+                "resources",
+                "metrics",
+                "steps",
+                "projection_start_time",
+                "projection_end_time",
+                "training_start_time",
+                "training_end_time",
+                "resolution",
+            },
+            "PlanningSimulationArrayReference": {"id", "name"},
+            "PlanningSimulationMetricRequest": {"name", "aggregation"},
+            "PlanningSimulationResponse": {"items", "total_item_count"},
+            "PlanningSimulationMetric": {
+                "as_of",
+                "id",
+                "name",
+                "aggregation",
+                "data",
+                "resolution",
+                "resources",
+                "unit",
+            },
+            "FixedReferenceFqdn": {"id", "name", "resource_type", "fqdn"},
+        }
+        # an array of REST 1.6 has every field that pure1_resolve_arrays()
+        # returns (it has no topology group, which this module does not read)
+        assert {"id", "name", "fqdn", "os", "model", "version"} <= set(
+            PINNED_MODELS.Array.__fields__
+        )
+
+    @pytest.mark.parametrize("count", [11, 14])
+    def test_more_arrays_than_pure1_simulates_fail_before_the_simulation(
+        self, pure1_client, count
+    ):
+        """Pure1 refuses a request with more than 10 arrays (2026-11-25)"""
+        names = ["array{0}".format(number) for number in range(1, count + 1)]
+
+        module = _run(
+            pure1_client,
+            arrays=names,
+            metrics=["projected_capacity"],
+            aggregation="average",
+        )
+
+        module.fail_json.assert_called_once_with(
+            msg="arrays names {0} arrays, and Pure1 simulates at most 10 in one "
+            "request.".format(count)
+        )
+        module.exit_json.assert_not_called()
+        # the task fails before it tells of an option that is not sent
+        module.warn.assert_not_called()
+        # the names are resolved first, and no simulation is asked for
+        assert _requests(pure1_client) == {"get_arrays": 2}
+
+    def test_ten_arrays_are_simulated(self, pure1_client):
+        names = ["array{0}".format(number) for number in range(1, 11)]
+
+        module = _run(pure1_client, arrays=names)
+
+        module.fail_json.assert_not_called()
+        assert _body(pure1_client)["resources"] == [{"name": name} for name in names]
+        assert list(_result(module)["arrays"]) == names
+
+    def test_array_named_more_than_once_counts_once(self, pure1_client):
+        """Twelve names of the task that are ten arrays of Pure1"""
+        names = ["array{0}".format(number) for number in range(1, 11)]
+        _known_arrays(pure1_client, *names)
+        pure1_client.post_arrays_simulations.return_value = _simulation_answer([])
+
+        module = run_main(pure1_simulation, arrays=names + ["ARRAY1", "array10"])
+
+        module.fail_json.assert_not_called()
+        assert _body(pure1_client)["resources"] == [{"name": name} for name in names]
+
+    def test_arrays_of_one_name_count_as_the_one_name_that_is_sent(self, pure1_client):
+        """Pure1 counts the entries of the request, which names an array of
+        a name that two arrays carry once"""
+        names = ["array{0}".format(number) for number in range(1, 11)]
+        _known_arrays(
+            pure1_client, *names + [sdk_model("Array", id="second-id", name="array1")]
+        )
+        pure1_client.post_arrays_simulations.return_value = _simulation_answer([])
+
+        module = run_main(pure1_simulation, arrays=names)
+
+        module.fail_json.assert_not_called()
+        assert _body(pure1_client)["resources"] == [{"name": name} for name in names]
+        module.warn.assert_called_once_with(
+            "Arrays that carry the name of another array of the task are left "
+            "out of the result with their projections: 1."
+        )
+
+    def test_unknown_array_is_told_before_the_number_of_arrays(self, pure1_client):
+        names = ["array{0}".format(number) for number in range(1, 12)]
+        _known_arrays(pure1_client, *names)
+
+        module = run_main(pure1_simulation, arrays=names + ["Foo"])
+
+        module.fail_json.assert_called_once_with(msg="Array Foo is not known to Pure1.")
+        assert _requests(pure1_client) == {"get_arrays": 2}
 
     def test_unknown_array_fails_before_the_simulation(self, pure1_client):
         _known_arrays(pure1_client, "array1")
@@ -826,16 +985,6 @@ class TestRequests:
                 id="training_days above the bound",
             ),
             pytest.param(
-                {"resolution": 0},
-                "resolution must be 1 or more, got 0",
-                id="resolution 0",
-            ),
-            pytest.param(
-                {"resolution": -86400000},
-                "resolution must be 1 or more, got -86400000",
-                id="resolution negative",
-            ),
-            pytest.param(
                 {"metrics": ["projected_load", "projected_iops"]},
                 "value of metrics must be one or more of: projected_load, "
                 "projected_capacity. Got no match for: projected_iops",
@@ -861,9 +1010,7 @@ class TestRequests:
         client_factory.assert_not_called()
         assert _requests(pure1_client) == {}
 
-    @pytest.mark.parametrize(
-        "option", ["projection_days", "training_days", "resolution"]
-    )
+    @pytest.mark.parametrize("option", ["projection_days", "training_days"])
     def test_number_of_another_type_is_refused(self, pure1_client, option):
         module = run_main(pure1_simulation, arrays=["array1"], **{option: "soon"})
 
@@ -886,6 +1033,20 @@ class TestRequests:
         )
         client_factory.assert_not_called()
 
+    @pytest.mark.parametrize("value", [86400000, 3600000])
+    def test_resolution_is_no_option(self, pure1_client, client_factory, value):
+        """Pure1 takes one day only between two points (2026-11-25), which it
+        uses unasked: the module has no option for it and sends none"""
+        module = run_main(pure1_simulation, arrays=["array1"], resolution=value)
+
+        module.fail_json.assert_called_once()
+        assert module.fail_json.call_args[1]["msg"].startswith(
+            "Unsupported parameters for module: resolution."
+        )
+        module.exit_json.assert_not_called()
+        client_factory.assert_not_called()
+        assert _requests(pure1_client) == {}
+
     def test_options_are_documented_as_the_tests_of_this_class_pin_them(self):
         """Type, choices, default and required of each option; validate-modules
         of ansible-test compares the documentation with the argument spec"""
@@ -905,7 +1066,6 @@ class TestRequests:
             "aggregation": {"type": "str", "choices": ["blended_max", "average"]},
             "projection_days": {"type": "int"},
             "training_days": {"type": "int"},
-            "resolution": {"type": "int"},
         }
 
     def test_older_sdk_fails_before_any_request_of_the_module(self, pure1_client):
@@ -940,6 +1100,63 @@ class TestProjections:
         module.warn.assert_not_called()
         assert _result(module)["arrays"] == {
             "array1": _array_row(projected_capacity=EMPTY_ROW)
+        }
+
+    def test_projections_in_the_shape_that_pure1_answered_with(self, pure1_client):
+        """As seen on 2026-11-25: an empty unit, fractions, blended_max for
+        the capacity as well, and one point for each of the 90 days from the
+        last midnight UTC"""
+        load = [[MIDNIGHT + day * DAY, 0.25 + day / 1024.0] for day in range(90)]
+        capacity = [[MIDNIGHT + day * DAY, 0.125 - day / 1024.0] for day in range(90)]
+        projections = [
+            _load(data=load),
+            _capacity(
+                as_of=LOAD_AS_OF,
+                aggregation="blended_max",
+                data=capacity,
+                resolution=86400000,
+                unit="",
+            ),
+        ]
+
+        module = _run(pure1_client, projections)
+
+        module.warn.assert_not_called()
+        first = {
+            "time": "2026-11-24 00:00:00 UTC",
+            "time_epoch": 1795478400000,
+        }
+        last = {
+            "time": "2027-02-21 00:00:00 UTC",
+            "time_epoch": 1803168000000,
+        }
+        assert _result(module)["arrays"] == {
+            "array1": _array_row(
+                projected_load={
+                    "unit": "",
+                    "aggregation": "blended_max",
+                    "resolution": 86400000,
+                    "as_of": "2026-11-24 10:15:30 UTC",
+                    "as_of_epoch": 1795515330000,
+                    "first": dict(first, value=0.25),
+                    "last": dict(last, value=0.3369140625),
+                    "min": dict(first, value=0.25),
+                    "max": dict(last, value=0.3369140625),
+                    "data": load,
+                },
+                projected_capacity={
+                    "unit": "",
+                    "aggregation": "blended_max",
+                    "resolution": 86400000,
+                    "as_of": "2026-11-24 10:15:30 UTC",
+                    "as_of_epoch": 1795515330000,
+                    "first": dict(first, value=0.125),
+                    "last": dict(last, value=0.0380859375),
+                    "min": dict(last, value=0.0380859375),
+                    "max": dict(first, value=0.125),
+                    "data": capacity,
+                },
+            )
         }
 
     def test_values_that_are_false_are_kept(self, pure1_client):
@@ -1208,8 +1425,8 @@ class TestProjections:
             "array1": _array_row(projected_load=LOAD_ROW)
         }
         module.warn.assert_called_once_with(
-            "Pure1 lists 1 arrays under a name that an earlier array of this "
-            "task has: they and their projections are left out of the result."
+            "Arrays that carry the name of another array of the task are left "
+            "out of the result with their projections: 1."
         )
 
     def test_first_array_of_a_projection_counts(self, pure1_client):
@@ -1226,8 +1443,8 @@ class TestProjections:
             "array2": _array_row("array2", projected_load=LOAD_ROW),
         }
         module.warn.assert_called_once_with(
-            "Pure1 returned 2 projections that name more than one array: each "
-            "is in the result of the first array it names only."
+            "Projections that name more than one array are in the result of "
+            "the first array they name only: 2."
         )
 
     def test_projection_that_names_several_arrays_and_is_left_out(self, pure1_client):
@@ -1244,10 +1461,10 @@ class TestProjections:
             "array1": _array_row(projected_capacity=CAPACITY_ROW)
         }
         assert [call[0][0] for call in module.warn.call_args_list] == [
-            "Pure1 returned 1 projections without a metric or without an array "
-            "of this task: they are left out of the result.",
-            "Pure1 returned 1 projections of a metric that the array already "
-            "has a projection of: only the first of each is in the result.",
+            "Projections that Pure1 returned for no array and metric of the "
+            "task are left out of the result: 1.",
+            "Projections that Pure1 returned after another one of the same "
+            "array and metric are left out of the result: 1.",
         ]
 
     @pytest.mark.parametrize(
@@ -1281,8 +1498,8 @@ class TestProjections:
             "array1": _array_row(projected_capacity=CAPACITY_ROW)
         }
         module.warn.assert_called_once_with(
-            "Pure1 returned 1 projections without a metric or without an array "
-            "of this task: they are left out of the result."
+            "Projections that Pure1 returned for no array and metric of the "
+            "task are left out of the result: 1."
         )
 
     def test_null_among_the_projections_is_left_out(self, pure1_client):
@@ -1302,8 +1519,8 @@ class TestProjections:
             "array1": _array_row(projected_load=LOAD_ROW)
         }
         module.warn.assert_called_once_with(
-            "Pure1 returned 1 projections without a metric or without an array "
-            "of this task: they are left out of the result."
+            "Projections that Pure1 returned for no array and metric of the "
+            "task are left out of the result: 1."
         )
 
     def test_metric_that_was_not_asked_for_is_left_out(self, pure1_client):
@@ -1315,8 +1532,8 @@ class TestProjections:
             "array1": _array_row(projected_capacity=CAPACITY_ROW)
         }
         module.warn.assert_called_once_with(
-            "Pure1 returned 1 projections without a metric or without an array "
-            "of this task: they are left out of the result."
+            "Projections that Pure1 returned for no array and metric of the "
+            "task are left out of the result: 1."
         )
 
     def test_projections_left_out_give_one_warning(self, pure1_client):
@@ -1333,8 +1550,8 @@ class TestProjections:
             "array1": _array_row(projected_load=LOAD_ROW)
         }
         module.warn.assert_called_once_with(
-            "Pure1 returned 3 projections without a metric or without an array "
-            "of this task: they are left out of the result."
+            "Projections that Pure1 returned for no array and metric of the "
+            "task are left out of the result: 3."
         )
 
     def test_second_projection_of_a_metric_is_left_out(self, pure1_client):
@@ -1356,8 +1573,8 @@ class TestProjections:
             "array2": _array_row("array2", projected_load=LOAD_ROW),
         }
         module.warn.assert_called_once_with(
-            "Pure1 returned 2 projections of a metric that the array already "
-            "has a projection of: only the first of each is in the result."
+            "Projections that Pure1 returned after another one of the same "
+            "array and metric are left out of the result: 2."
         )
 
     def test_second_array_of_one_name_is_left_out(self, pure1_client):
@@ -1398,8 +1615,8 @@ class TestProjections:
             "array2": _array_row("array2", projected_load=LOAD_ROW),
         }
         module.warn.assert_called_once_with(
-            "Pure1 lists 1 arrays under a name that an earlier array of this "
-            "task has: they and their projections are left out of the result."
+            "Arrays that carry the name of another array of the task are left "
+            "out of the result with their projections: 1."
         )
 
     @pytest.mark.parametrize(
@@ -1451,8 +1668,8 @@ class TestProjections:
 
         assert _result(module)["arrays"] == {"array1": _array_row()}
         module.warn.assert_called_once_with(
-            "Pure1 sent 2 projections and counted none: they cannot be read "
-            "and are not in the result."
+            "Projections that Pure1 sent and counted as none cannot be read "
+            "and are left out of the result: 2."
         )
 
     def test_every_warning_of_a_run(self, pure1_client):
@@ -1485,16 +1702,18 @@ class TestProjections:
             "aggregation applies to projected_load only, which metrics does "
             "not name: it is not sent to Pure1.",
             "Pure1 returned 4 of 7 projections: the result may be incomplete.",
-            "Pure1 lists 1 arrays under a name that an earlier array of this "
-            "task has: they and their projections are left out of the result.",
-            "Pure1 returned 1 projections without a metric or without an array "
-            "of this task: they are left out of the result.",
-            "Pure1 returned 1 projections of a metric that the array already "
-            "has a projection of: only the first of each is in the result.",
-            "Pure1 returned 1 projections that name more than one array: each "
-            "is in the result of the first array it names only.",
+            "Arrays that carry the name of another array of the task are left "
+            "out of the result with their projections: 1.",
+            "Projections that Pure1 returned for no array and metric of the "
+            "task are left out of the result: 1.",
+            "Projections that Pure1 returned after another one of the same "
+            "array and metric are left out of the result: 1.",
+            "Projections that name more than one array are in the result of "
+            "the first array they name only: 1.",
         ]
         assert all(warning.endswith(".") for warning in warnings)
+        # a warning that counts ends in its number
+        assert all(warning.endswith(": 1.") for warning in warnings[2:])
 
 
 class TestFailures:
@@ -1583,6 +1802,227 @@ class TestFailures:
         module.exit_json.assert_not_called()
 
 
+class TestRefusedArray:
+    """Pure1 names an array that it refuses by its id (2026-11-25): the task
+    fails with the line of the shared helpers, in which the array has its
+    name. Any other failure is that line unchanged."""
+
+    def _message(self, pure1_client, answer, *arrays):
+        """Return the message of a task for Array1 and array2 that fails
+        with this answer to the simulation, an error answer or a raised
+        error; arrays are the arrays Pure1 knows when they are others"""
+        _known_arrays(
+            pure1_client,
+            *arrays
+            or (
+                sdk_model("Array", id=ARRAY1_ID, name="Array1"),
+                sdk_model("Array", id=ARRAY2_ID, name="array2"),
+            )
+        )
+        if isinstance(answer, Exception):
+            pure1_client.post_arrays_simulations.side_effect = answer
+        else:
+            pure1_client.post_arrays_simulations.return_value = answer
+
+        module = run_main(pure1_simulation, arrays=["array1", "ARRAY2"])
+
+        module.fail_json.assert_called_once()
+        assert list(module.fail_json.call_args[1]) == ["msg"]
+        module.exit_json.assert_not_called()
+        module.warn.assert_not_called()
+        pure1_client.post_arrays_simulations.assert_called_once()
+        return module.fail_json.call_args[1]["msg"]
+
+    @pytest.mark.parametrize(
+        "array_id, name",
+        [
+            # as Pure1 spells it: the task names array1 and ARRAY2
+            pytest.param(ARRAY1_ID, "Array1", id="first array"),
+            pytest.param(ARRAY2_ID, "array2", id="second array"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param(NOT_SUPPORTED, id="not supported"),
+            pytest.param(TOO_LITTLE_HISTORY, id="too little history"),
+        ],
+    )
+    def test_refused_array_is_named(self, pure1_client, text, array_id, name):
+        answer = error_response(400, "Invalid value", text.format(array_id))
+
+        message = self._message(pure1_client, answer)
+
+        assert message == FAILED + text.format(name)
+        assert array_id not in message
+
+    def test_every_array_of_the_task_is_named_wherever_its_id_stands(
+        self, pure1_client
+    ):
+        answer = error_response(
+            400,
+            "Invalid value",
+            "No projection for {0}, {1} and {0}".format(ARRAY2_ID, ARRAY1_ID),
+        )
+
+        assert self._message(pure1_client, answer) == (
+            FAILED + "No projection for array2, Array1 and array2"
+        )
+
+    def test_id_that_is_no_array_of_the_task_is_left_alone(self, pure1_client):
+        answer = error_response(
+            400,
+            "Invalid value",
+            NOT_SUPPORTED.format(OTHER_ID) + " " + NOT_SUPPORTED.format(ARRAY1_ID),
+        )
+
+        assert self._message(pure1_client, answer) == FAILED + " ".join(
+            [NOT_SUPPORTED.format(OTHER_ID), NOT_SUPPORTED.format("Array1")]
+        )
+
+    @pytest.mark.parametrize(
+        "longer",
+        [
+            pytest.param(ARRAY1_ID + "-0001", id="more after it"),
+            pytest.param(ARRAY1_ID + "f", id="a character after it"),
+            pytest.param("0000-" + ARRAY1_ID, id="more before it"),
+            pytest.param("f" + ARRAY1_ID, id="a character before it"),
+            pytest.param("id_" + ARRAY1_ID, id="a name before it"),
+        ],
+    )
+    def test_id_inside_a_longer_one_is_left_alone(self, pure1_client, longer):
+        answer = error_response(400, "Invalid value", NOT_SUPPORTED.format(longer))
+
+        assert self._message(pure1_client, answer) == (
+            FAILED + NOT_SUPPORTED.format(longer)
+        )
+
+    @pytest.mark.parametrize(
+        "around",
+        [
+            pytest.param("{0}", id="alone"),
+            pytest.param("array '{0}' is refused", id="quotes"),
+            pytest.param("arrays/{0}/simulations", id="a path"),
+            pytest.param("(id={0})", id="parentheses"),
+            pytest.param("{0}.", id="end of a sentence"),
+        ],
+    )
+    def test_id_is_told_from_what_stands_around_it(self, pure1_client, around):
+        answer = error_response(400, "Invalid value", around.format(ARRAY2_ID))
+
+        assert self._message(pure1_client, answer) == FAILED + around.format("array2")
+
+    @pytest.mark.parametrize(
+        "answer, message",
+        [
+            pytest.param(
+                error_response(400, "Invalid value", TOO_MANY_ARRAYS),
+                FAILED + TOO_MANY_ARRAYS,
+                id="error answer",
+            ),
+            pytest.param(
+                error_response(403, "Access denied"),
+                "Pure1 request post_arrays_simulations failed (HTTP 403): "
+                "Access denied",
+                id="error answer without context",
+            ),
+            pytest.param(
+                ErrorResponse(503, [], {}),
+                "Pure1 request post_arrays_simulations failed (HTTP 503): "
+                "Service Unavailable",
+                id="error answer without message",
+            ),
+            pytest.param(
+                PureError("token refused"),
+                "Pure1 request post_arrays_simulations failed: PureError: "
+                "token refused",
+                id="PureError",
+            ),
+            pytest.param(
+                TimeoutError("The read operation timed out"),
+                "Pure1 request post_arrays_simulations failed: TimeoutError: "
+                "The read operation timed out",
+                id="transport error",
+            ),
+        ],
+    )
+    def test_failure_without_an_id_is_the_line_of_the_shared_helpers(
+        self, pure1_client, answer, message
+    ):
+        assert self._message(pure1_client, answer) == message
+
+    def test_failure_is_the_line_that_the_shared_helper_fails_with(self, pure1_client):
+        """The same answer through pure1_response() as every other module
+        calls it"""
+        answer = error_response(400, "Invalid value", NOT_SUPPORTED.format(OTHER_ID))
+        helper = ansible_module()
+        with pytest.raises(SystemExit):
+            pure1_response(helper, "post_arrays_simulations", lambda: answer)
+
+        assert (
+            self._message(pure1_client, answer)
+            == helper.fail_json.call_args[1]["msg"]
+            == FAILED + NOT_SUPPORTED.format(OTHER_ID)
+        )
+
+    def test_raised_error_that_holds_an_id_names_the_array(self, pure1_client):
+        error = PureError("no projection of " + ARRAY1_ID)
+
+        assert self._message(pure1_client, error) == (
+            "Pure1 request post_arrays_simulations failed: PureError: "
+            "no projection of Array1"
+        )
+
+    def test_array_that_is_left_out_for_its_name_is_named_as_well(self, pure1_client):
+        """Two arrays of one name: Pure1 can refuse either of them"""
+        answer = error_response(400, "Invalid value", NOT_SUPPORTED.format(OTHER_ID))
+
+        message = self._message(
+            pure1_client,
+            answer,
+            sdk_model("Array", id=ARRAY1_ID, name="Array1"),
+            sdk_model("Array", id=OTHER_ID, name="Array1"),
+            sdk_model("Array", id=ARRAY2_ID, name="array2"),
+        )
+
+        assert message == FAILED + NOT_SUPPORTED.format("Array1")
+
+    def test_array_without_an_id_is_not_looked_for(self, pure1_client):
+        answer = error_response(400, "Invalid value", NOT_SUPPORTED.format(ARRAY1_ID))
+
+        message = self._message(
+            pure1_client,
+            answer,
+            sdk_model("Array", name="Array1"),
+            sdk_model("Array", name="array2"),
+        )
+
+        assert message == FAILED + NOT_SUPPORTED.format(ARRAY1_ID)
+
+    def test_id_is_looked_for_as_it_is_written(self):
+        """An id is no pattern: its characters stand for themselves, and so
+        do those of the name that takes its place"""
+        error = Pure1RequestError(
+            "post_arrays_simulations",
+            400,
+            "Invalid value: No projection for abc+(1), a.c+(1), x and x.y",
+        )
+        arrays = [
+            {"id": "a.c+(1)", "name": "Array1"},
+            {"id": "x", "name": "array2\\g<0>"},
+            # what is no id is not looked for
+            {"id": "", "name": "array3"},
+            {"id": None, "name": "array4"},
+            {"id": 1, "name": "array5"},
+            # an id that begins with another one is the longer of the two
+            {"id": "x.y", "name": "array6"},
+        ]
+
+        assert pure1_simulation.refusal_text(error, arrays) == (
+            FAILED + "No projection for abc+(1), Array1, array2\\g<0> and array6"
+        )
+
+
 class _WireAnswer:
     """What the REST client of the SDK returns for a request: a status and a body"""
 
@@ -1623,10 +2063,11 @@ def _through_the_sdk(wire):
     """
     configuration = Configuration()
     configuration.host = "https://pure1.example.com"
-    api_client = NEWEST.client.ApiClient(configuration, models_package=MODELS)
+    # the client of the version the module asks through, as main() has it
+    api_client = PINNED.client.ApiClient(configuration, models_package=PINNED_MODELS)
     api_client.rest_client = wire
-    planning = NEWEST.client.api.PlanningApi(api_client)
-    # api17_arrays_simulations_post_with_http_info in the client of REST 1.7
+    planning = PINNED.client.api.PlanningApi(api_client)
+    # api16_arrays_simulations_post_with_http_info in the client of REST 1.6
     (function,) = [
         name
         for name in dir(planning)
@@ -1635,7 +2076,7 @@ def _through_the_sdk(wire):
 
     def call(**kwargs):
         response = getattr(planning, function)(**kwargs)
-        return NEWEST.Client._create_valid_response(
+        return PINNED.Client._create_valid_response(
             None, response, _no_later_page, kwargs
         )
 
@@ -1708,12 +2149,12 @@ class TestThroughTheSdk:
             aggregation="average",
             projection_days=30,
             training_days=60,
-            resolution=3600000,
         )
 
         (sent,) = wire.sent
-        assert sent["url"].startswith("https://pure1.example.com/api/1.")
-        assert sent["url"].endswith("/arrays/simulations")
+        # the path that Pure1 answered on (2026-11-25): on that of REST 1.7
+        # it refused the same body
+        assert sent["url"] == "https://pure1.example.com/api/1.6/arrays/simulations"
         assert sent["body"] == {
             "resources": [{"name": "array1"}],
             "metrics": [
@@ -1722,7 +2163,6 @@ class TestThroughTheSdk:
             ],
             "projection_end_time": 1798070400000,
             "training_start_time": 1790294400000,
-            "resolution": 3600000,
         }
         assert sent["body"] == _body(pure1_client)
         assert not sent["query_params"]
@@ -1785,8 +2225,8 @@ class TestThroughTheSdk:
             ),
         }
         module.warn.assert_called_once_with(
-            "Pure1 returned 2 projections without a metric or without an array "
-            "of this task: they are left out of the result."
+            "Projections that Pure1 returned for no array and metric of the "
+            "task are left out of the result: 2."
         )
 
     def test_answer_with_no_projection_is_read(self, pure1_client):
@@ -1812,8 +2252,8 @@ class TestThroughTheSdk:
 
         assert _result(module)["arrays"] == {"array1": _array_row()}
         module.warn.assert_called_once_with(
-            "Pure1 sent 2 projections and counted none: they cannot be read "
-            "and are not in the result."
+            "Projections that Pure1 sent and counted as none cannot be read "
+            "and are left out of the result: 2."
         )
 
     def test_count_between_one_and_the_projections_sent_is_not_seen(self, pure1_client):
@@ -1838,8 +2278,8 @@ class TestThroughTheSdk:
                 {"resources": [{"name": {"is": "array1"}}]},
                 {},
                 [
-                    "Pure1 returned 1 projections without a metric or without "
-                    "an array of this task: they are left out of the result."
+                    "Projections that Pure1 returned for no array and metric "
+                    "of the task are left out of the result: 1."
                 ],
                 id="array name that is no string",
             ),
@@ -1847,8 +2287,8 @@ class TestThroughTheSdk:
                 {"resources": [{"id": ["array1-id"]}]},
                 {},
                 [
-                    "Pure1 returned 1 projections without a metric or without "
-                    "an array of this task: they are left out of the result."
+                    "Projections that Pure1 returned for no array and metric "
+                    "of the task are left out of the result: 1."
                 ],
                 id="array id that is no string",
             ),
@@ -2013,7 +2453,6 @@ class TestDocumentation:
             aggregation="average",
             projection_days=30,
             training_days=60,
-            resolution=3600000,
         )
         return module.exit_json.call_args[1]
 
@@ -2116,10 +2555,16 @@ class TestDocumentation:
             aggregation="average",
             projection_days=days,
             training_days=history,
-            resolution=request["resolution"],
         )
 
-        assert load["data"][0][0] == MIDNIGHT
+        # as Pure1 answered (2026-11-25): one point for each day that is
+        # projected, the first at the last midnight UTC
+        assert [point[0] for point in load["data"]] == [
+            MIDNIGHT + day * DAY for day in range(days)
+        ]
+        assert load["resolution"] == DAY
+        assert load["unit"] == ""
+        assert all(0 <= point[1] <= 1 for point in load["data"])
         assert _result(module) == {
             "request": request,
             "arrays": {
@@ -2186,15 +2631,20 @@ class TestDocumentation:
             ),
             pytest.param(
                 "DOCUMENTATION",
-                "options.resolution.description",
-                "in milliseconds, 1 or more.",
-                id="resolution",
+                "notes",
+                "This module makes the Pure1 REST 1.6 call "
+                "C(post_arrays_simulations), which came with py-pure-client "
+                "1.99.0.",
+                id="the release of the SDK",
             ),
             pytest.param(
                 "DOCUMENTATION",
                 "notes",
-                "This module needs py-pure-client 1.99.0 or later.",
-                id="the release of the SDK",
+                "It makes its requests through Pure1 REST 1.6, also where the "
+                "installed py-pure-client knows a newer version, because Pure1 "
+                "did not accept the request for a simulation on the Pure1 REST "
+                "1.7 path when this was written.",
+                id="the version of Pure1 REST",
             ),
             pytest.param(
                 "DOCUMENTATION",
@@ -2203,19 +2653,125 @@ class TestDocumentation:
                 id="the requests",
             ),
             pytest.param(
+                "DOCUMENTATION",
+                "notes",
+                "py-pure-client waits 15 seconds for the answer to a request. A "
+                "request for one or two arrays took a few seconds when this was "
+                "written.",
+                id="the time of a request",
+            ),
+            pytest.param(
+                "DOCUMENTATION",
+                "description",
+                "Pure1 projects FlashArrays. When this was written it refused a "
+                "FlashBlade and a Cloud Block Store array. One array that Pure1 "
+                "refuses fails the task, also for the other arrays of the task.",
+                id="the arrays that Pure1 projects",
+            ),
+            pytest.param(
+                "DOCUMENTATION",
+                "description",
+                "When this was written they were fractions of 1 with an empty "
+                "C(unit). For the load, C(0.5) is half of the performance "
+                "capacity of the array in use. For the capacity, C(0.5) is half "
+                "of the capacity of the array in use.",
+                id="the values",
+            ),
+            pytest.param(
+                "DOCUMENTATION",
+                "description",
+                "Pure1 projects 90 days ahead in daily points, the first of "
+                "them at the last midnight UTC.",
+                id="the points",
+            ),
+            pytest.param(
+                "DOCUMENTATION",
+                "options.arrays.description",
+                "Pure1 simulates at most 10 arrays in one request. A task that "
+                "names more arrays fails before any projection is asked for. An "
+                "array that is named more than once counts once.",
+                id="more than ten arrays",
+            ),
+            pytest.param(
+                "DOCUMENTATION",
+                "options.arrays.description",
+                "Pure1 names an array that it refuses to project by its id. The "
+                "message of the failed task has the name of the array in its "
+                "place.",
+                id="a refused array",
+            ),
+            pytest.param(
+                "DOCUMENTATION",
+                "options.projection_days.description",
+                "Pure1 returns one point for each day, the first at the last "
+                "midnight UTC, so that a projection of 30 days has 30 points.",
+                id="the points of projection_days",
+            ),
+            pytest.param(
+                "DOCUMENTATION",
+                "options.training_days.description",
+                "When this was written it refused 14 days and less and accepted "
+                "21 days.",
+                id="a history that is too short",
+            ),
+            pytest.param(
                 "RETURN",
                 "pure1_simulation.contains.arrays.description",
-                "Every array of I(arrays) is listed, also one that Pure1 "
-                "returned no projection for.",
+                "Every array of I(arrays) is listed. When this was written "
+                "Pure1 answered with the projections of every array or refused "
+                "the whole request, which fails the task.",
                 id="an array without a projection",
             ),
             pytest.param(
                 "RETURN",
                 "pure1_simulation.contains.arrays.contains.projected_load.description",
                 "An empty dictionary when I(metrics) does not name "
-                "C(projected_load) or Pure1 returned no such projection for the "
-                "array.",
+                "C(projected_load), and when the answer of Pure1 has no such "
+                "projection for the array, which was not seen when this was "
+                "written.",
                 id="no projection of the load",
+            ),
+            pytest.param(
+                "RETURN",
+                "pure1_simulation.contains.arrays.contains.projected_load"
+                ".contains.unit.description",
+                "It was an empty string when this was written, and the values "
+                "were fractions of 1. C(0.5) is half of the performance capacity "
+                "of the array in use.",
+                id="the unit of the load",
+            ),
+            pytest.param(
+                "RETURN",
+                "pure1_simulation.contains.arrays.contains.projected_capacity"
+                ".contains.unit.description",
+                "It was an empty string when this was written, and the values "
+                "were fractions of 1. C(0.5) is half of the capacity of the "
+                "array in use.",
+                id="the unit of the capacity",
+            ),
+            pytest.param(
+                "RETURN",
+                "pure1_simulation.contains.arrays.contains.projected_capacity"
+                ".contains.aggregation.description",
+                "Pure1 reports one for the capacity as well, C(blended_max) when "
+                "this was written, although I(aggregation) applies to the load "
+                "only.",
+                id="the aggregation of the capacity",
+            ),
+            pytest.param(
+                "RETURN",
+                "pure1_simulation.contains.arrays.contains.projected_load"
+                ".contains.resolution.description",
+                "Pure1 projects in daily points, C(86400000).",
+                id="the resolution of a projection",
+            ),
+            pytest.param(
+                "RETURN",
+                "pure1_simulation.contains.arrays.contains.projected_capacity"
+                ".contains.data.description",
+                "Pure1 sends one point for each day, the first at the last "
+                "midnight UTC.",
+                id="the points of a projection",
             ),
             pytest.param(
                 "RETURN",
@@ -2250,6 +2806,35 @@ class TestDocumentation:
             entry = [entry]
 
         assert says in " ".join(" ".join(entry).split())
+
+    def test_documentation_has_no_option_for_the_time_between_two_points(self):
+        """Pure1 takes one day only (2026-11-25): resolution is a key of a
+        returned projection and nothing else"""
+        documentation = yaml.safe_load(pure1_simulation.DOCUMENTATION)
+        returned = yaml.safe_load(pure1_simulation.RETURN)["pure1_simulation"]
+
+        assert "resolution" not in documentation["options"]
+        assert "I(resolution)" not in pure1_simulation.DOCUMENTATION
+        assert "I(resolution)" not in pure1_simulation.RETURN
+        assert "resolution" not in pure1_simulation.EXAMPLES
+        assert "resolution" not in returned["contains"]["request"]["contains"]
+        assert "resolution" not in returned["sample"]["request"]
+        array = returned["contains"]["arrays"]["contains"]
+        for metric in ("projected_load", "projected_capacity"):
+            assert array[metric]["contains"]["resolution"]["type"] == "int"
+        sample = returned["sample"]["arrays"]["array1"]["projected_load"]
+        assert sample["resolution"] == 86400000
+
+    def test_note_on_the_sdk_reads_as_no_requirement(self):
+        """The collection requires py-pure-client 1.99.0: a note of a module
+        names a release as information only"""
+        notes = " ".join(
+            " ".join(yaml.safe_load(pure1_simulation.DOCUMENTATION)["notes"]).split()
+        )
+
+        assert notes.count("py-pure-client 1.99.0") == 1
+        for requirement in ("needs", "requires", "required", "or later", "at least"):
+            assert requirement not in notes, requirement
 
     def test_examples_use_every_option_of_the_module(self):
         options = set(yaml.safe_load(pure1_simulation.DOCUMENTATION)["options"])
@@ -2340,7 +2925,6 @@ class TestDocumentation:
                 "metrics": [{"name": "projected_load", "aggregation": "average"}],
                 "projection_end_time": MIDNIGHT + 30 * DAY,
                 "training_start_time": MIDNIGHT - 60 * DAY,
-                "resolution": 86400000,
             },
             {
                 "resources": [{"name": "array1"}, {"name": "array2"}],

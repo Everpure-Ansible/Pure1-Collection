@@ -810,8 +810,13 @@ def _certificate_hint(text):
     return ""
 
 
-def get_pure1(module):
-    """Return System Object or Fail"""
+def get_pure1(module, version=None):
+    """Return System Object or Fail
+
+    version is the Pure1 REST version the client talks, such as "1.6", for a
+    module whose call must not go to the newest version the installed
+    py-pure-client knows. Without it the client talks that newest version.
+    """
     if not HAS_PYPURECLIENT:
         module.fail_json(
             msg=missing_required_lib("py-pure-client"), exception=PYPURECLIENT_IMP_ERR
@@ -831,7 +836,10 @@ def get_pure1(module):
         "platform": platform.platform(),
     }
     try:
-        pure_1 = _create_client(_client_arguments(module, app_id, key_file))
+        arguments = _client_arguments(module, app_id, key_file)
+        if version:
+            arguments["version"] = version
+        pure_1 = _create_client(arguments)
         _discard_token_file(pure_1)
         pure_1._api_client.set_default_header("User-Agent", user_agent)
     except Exception as error:

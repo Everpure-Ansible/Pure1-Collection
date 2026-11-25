@@ -16,11 +16,18 @@ short_description: Collect the projected load and capacity of arrays from Pure1
 description:
   - Returns the load and the capacity that Pure1 projects for the named
     arrays, for each of them as a time series with its first, last, lowest
-    and highest point. Unless the options say otherwise, Pure1 projects three
-    months ahead in daily points, from the history of the last three months.
+    and highest point. Unless the options say otherwise, Pure1 projects 90
+    days ahead in daily points, the first of them at the last midnight UTC.
   - Use it to check that an array is projected to stay below a threshold
     before more is provisioned on it, or to report the arrays whose capacity
     is projected to grow.
+  - Pure1 projects FlashArrays. When this was written it refused a
+    FlashBlade and a Cloud Block Store array. One array that Pure1 refuses
+    fails the task, also for the other arrays of the task.
+  - The values are returned as Pure1 sends them. When this was written they
+    were fractions of 1 with an empty C(unit). For the load, C(0.5) is half
+    of the performance capacity of the array in use. For the capacity,
+    C(0.5) is half of the capacity of the array in use.
   - Pure1 computes a projection when it is asked for one. The C(as_of) of a
     projection is the time that Pure1 gives for the freshness of its data.
   - The module asks for the projections with a POST request that stores and
@@ -31,9 +38,14 @@ options:
     description:
       - Names of the arrays to return the projections of. At least one name
         is required.
+      - Pure1 simulates at most 10 arrays in one request. A task that names
+        more arrays fails before any projection is asked for. An array that
+        is named more than once counts once.
       - A name is matched without regard to case and the result carries the
         name as Pure1 spells it. A name that Pure1 does not know fails the
         task before any projection is asked for.
+      - Pure1 names an array that it refuses to project by its id. The
+        message of the failed task has the name of the array in its place.
     type: list
     elements: str
     required: true
@@ -57,30 +69,32 @@ options:
       - The number of days to project, 1 to 36500. The projection starts at
         the last midnight UTC, and the module asks for it to end this number
         of days later.
-      - Pure1 projects three months when it is not set.
+      - Pure1 returns one point for each day, the first at the last midnight
+        UTC, so that a projection of 30 days has 30 points.
+      - Pure1 projects 90 days when it is not set.
     type: int
   training_days:
     description:
       - The number of days of history to compute the projection from, 1 to
         36500. The history ends at the last midnight UTC, and the module asks
         for it to start this number of days earlier.
+      - Pure1 refuses a history that is too short for it, which fails the
+        task. When this was written it refused 14 days and less and accepted
+        21 days.
       - Pure1 uses the history of three months when it is not set.
     type: int
-  resolution:
-    description:
-      - The time between two points of a projection, in milliseconds, 1 or
-        more.
-      - Pure1 returns one point for each day (C(86400000)) when it is not
-        set.
-    type: int
 notes:
-  - This module needs py-pure-client 1.99.0 or later. It is the first release
-    with the C(post_arrays_simulations) method of Pure1 REST 1.6.
+  - This module makes the Pure1 REST 1.6 call C(post_arrays_simulations),
+    which came with py-pure-client 1.99.0. It makes its requests through
+    Pure1 REST 1.6, also where the installed py-pure-client knows a newer
+    version, because Pure1 did not accept the request for a simulation on
+    the Pure1 REST 1.7 path when this was written.
   - The module makes two requests to Pure1 whatever the options are, one for
     the arrays of the names and one for the projections.
   - Pure1 computes the projections while the request waits for them, and
-    py-pure-client waits 15 seconds for the answer to a request. A task that
-    fails with a read timeout may succeed with fewer arrays.
+    py-pure-client waits 15 seconds for the answer to a request. A request
+    for one or two arrays took a few seconds when this was written. A task
+    that fails with a read timeout may succeed with fewer arrays.
 author:
   - Everpure Ansible Team (@sdodsley) <pure-ansible-team@everpuredata.com>
 extends_documentation_fragment:
@@ -111,7 +125,6 @@ EXAMPLES = r"""
     aggregation: average
     projection_days: 30
     training_days: 60
-    resolution: 86400000
   register: month
 
 - name: Check that the load of the array is not projected to rise by more than half
@@ -155,9 +168,8 @@ pure1_simulation:
     request:
       description:
         - What the module asked Pure1 to project.
-        - A time and the C(resolution) are null when the task did not set the
-          option that gives them. Nothing is sent for them then, and Pure1
-          uses its default.
+        - A time is null when the task did not set the option that gives it.
+          Nothing is sent for it then, and Pure1 uses its default.
       type: dict
       contains:
         resources:
@@ -197,15 +209,13 @@ pure1_simulation:
             - The start of the history that I(training_days) gives, in
               milliseconds since the epoch.
           type: int
-        resolution:
-          description: The time between two points that I(resolution) gives, in milliseconds.
-          type: int
     arrays:
       description:
         - The projections of each array, as a dictionary keyed by array name.
           The value for an array is a dictionary with the keys listed here.
-        - Every array of I(arrays) is listed, also one that Pure1 returned no
-          projection for.
+        - Every array of I(arrays) is listed. When this was written Pure1
+          answered with the projections of every array or refused the whole
+          request, which fails the task.
         - A key is null when Pure1 reports no value for it.
       type: dict
       contains:
@@ -220,20 +230,27 @@ pure1_simulation:
             - The projected load of the array, a dictionary with the keys
               listed here.
             - An empty dictionary when I(metrics) does not name
-              C(projected_load) or Pure1 returned no such projection for the
-              array.
+              C(projected_load), and when the answer of Pure1 has no such
+              projection for the array, which was not seen when this was
+              written.
           type: dict
           contains:
             unit:
               description:
-                - The unit of the values, as Pure1 names it. It can be an
-                  empty string.
+                - The unit of the values, as Pure1 sends it. It was an empty
+                  string when this was written, and the values were
+                  fractions of 1. C(0.5) is half of the performance capacity
+                  of the array in use.
               type: str
             aggregation:
-              description: The aggregation of the values, as Pure1 names it.
+              description:
+                - The aggregation of the values, as Pure1 names it,
+                  C(blended_max) or C(average).
               type: str
             resolution:
-              description: The time between two points, in milliseconds.
+              description:
+                - The time between two points, in milliseconds. Pure1
+                  projects in daily points, C(86400000).
               type: int
             as_of:
               description:
@@ -320,6 +337,8 @@ pure1_simulation:
                 - The points of the projection as Pure1 returned them. Each
                   point is a list of its time, in milliseconds since the
                   epoch, and the projected value at that time.
+                - Pure1 sends one point for each day, the first at the last
+                  midnight UTC.
               type: list
               elements: list
         projected_capacity:
@@ -327,20 +346,29 @@ pure1_simulation:
             - The projected capacity of the array, a dictionary with the keys
               listed here.
             - An empty dictionary when I(metrics) does not name
-              C(projected_capacity) or Pure1 returned no such projection for
-              the array.
+              C(projected_capacity), and when the answer of Pure1 has no such
+              projection for the array, which was not seen when this was
+              written.
           type: dict
           contains:
             unit:
               description:
-                - The unit of the values, as Pure1 names it. It can be an
-                  empty string.
+                - The unit of the values, as Pure1 sends it. It was an empty
+                  string when this was written, and the values were
+                  fractions of 1. C(0.5) is half of the capacity of the array
+                  in use.
               type: str
             aggregation:
-              description: The aggregation of the values, as Pure1 names it.
+              description:
+                - The aggregation of the values, as Pure1 names it. Pure1
+                  reports one for the capacity as well, C(blended_max) when
+                  this was written, although I(aggregation) applies to the
+                  load only.
               type: str
             resolution:
-              description: The time between two points, in milliseconds.
+              description:
+                - The time between two points, in milliseconds. Pure1
+                  projects in daily points, C(86400000).
               type: int
             as_of:
               description:
@@ -427,6 +455,8 @@ pure1_simulation:
                 - The points of the projection as Pure1 returned them. Each
                   point is a list of its time, in milliseconds since the
                   epoch, and the projected value at that time.
+                - Pure1 sends one point for each day, the first at the last
+                  midnight UTC.
               type: list
               elements: list
   sample:
@@ -440,7 +470,6 @@ pure1_simulation:
       projection_end_time_epoch: 1795737600000
       training_start_time: 2026-09-25 00:00:00 UTC
       training_start_time_epoch: 1790294400000
-      resolution: 86400000
     arrays:
       array1:
         id: 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d
@@ -475,10 +504,12 @@ pure1_simulation:
 """
 
 
+import re
 import time
 
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.everpure.pure1.plugins.module_utils.pure1 import (
+    Pure1RequestError,
     get_pure1,
     pure1_argument_spec,
     pure1_attr,
@@ -495,13 +526,19 @@ AGGREGATED = "projected_load"
 DAY = 86400000
 # A hundred years: a period far beyond it gives a time that cannot be shown
 MAX_DAYS = 36500
+# Pure1 refuses a request that names more arrays (seen 2026-11-25)
+MAX_ARRAYS = 10
+# The simulation is asked for through Pure1 REST 1.6. Pure1 refuses the
+# request that py-pure-client sends on the REST 1.7 path ("Unrecognized field
+# resources", seen 2026-11-25) and answers the same request on the 1.6 path.
+REST_VERSION = "1.6"
 
 
 def check_options(module):
     """Fail the task for a value that the argument spec cannot refuse"""
     if not module.params["arrays"]:
         module.fail_json(msg="arrays must name at least one array.")
-    for option in ("projection_days", "training_days", "resolution"):
+    for option in ("projection_days", "training_days"):
         value = module.params[option]
         if value is not None and value < 1:
             module.fail_json(msg="{0} must be 1 or more, got {1}".format(option, value))
@@ -518,18 +555,33 @@ def last_midnight():
     return int(time.time()) // 86400 * DAY
 
 
-def simulation_body(module, arrays):
-    """Return the body of the simulation request for the options of the task
+def array_names(module, arrays):
+    """Return the names the simulation is asked for, as Pure1 spells them
 
-    arrays is what pure1_resolve_arrays() returned. The arrays are named as
-    Pure1 spells them, each name once, and a field that no option gives is
-    left out, for Pure1 to use its default.
+    arrays is what pure1_resolve_arrays() returned. Each name comes once, in
+    the order of the task. The task fails when they are more than Pure1
+    simulates in one request.
     """
-    params = module.params
     names = []
     for array in arrays:
         if array["name"] not in names:
             names.append(array["name"])
+    if len(names) > MAX_ARRAYS:
+        module.fail_json(
+            msg="arrays names {0} arrays, and Pure1 simulates at most {1} in one "
+            "request.".format(len(names), MAX_ARRAYS)
+        )
+    return names
+
+
+def simulation_body(module, names):
+    """Return the body of the simulation request for the options of the task
+
+    names is what array_names() returned. A field that no option gives is
+    left out, for Pure1 to use its default. The time between two points is
+    never sent: Pure1 takes one day only.
+    """
+    params = module.params
     metrics = []
     for name in params["metrics"] or METRICS:
         if name not in metrics:
@@ -552,8 +604,6 @@ def simulation_body(module, arrays):
             body["projection_end_time"] = midnight + params["projection_days"] * DAY
         if params["training_days"] is not None:
             body["training_start_time"] = midnight - params["training_days"] * DAY
-    if params["resolution"] is not None:
-        body["resolution"] = params["resolution"]
     return body
 
 
@@ -571,8 +621,34 @@ def request_row(body):
         "projection_end_time_epoch": projection_end,
         "training_start_time": pure1_time(training_start),
         "training_start_time_epoch": training_start,
-        "resolution": body.get("resolution"),
     }
+
+
+def refusal_text(error, arrays):
+    """Return the message of a simulation that failed, with its arrays named
+
+    Pure1 names an array that it refuses to project by its id. Each id of
+    an array of the task is replaced by the name of that array as Pure1
+    spells it. Any other text is the line of the shared helpers unchanged.
+    """
+    names = {}
+    for array in arrays:
+        # The SDK does not validate an answer: only a string can be looked for
+        if isinstance(array["id"], str) and array["id"]:
+            names.setdefault(array["id"], array["name"])
+    text = str(error)
+    if not names:
+        return text
+    # An id counts where it stands alone, not as a part of a longer one, and
+    # the longest id that stands there is the one
+    ids = "|".join(
+        re.escape(array_id) for array_id in sorted(names, key=len, reverse=True)
+    )
+    return re.sub(
+        r"(?<![\w-])(?:{0})(?![\w-])".format(ids),
+        lambda found: names[found.group(0)],
+        text,
+    )
 
 
 def is_number(value):
@@ -630,14 +706,18 @@ def projection_row(item):
 
 def generate_simulation_dict(module, pure_1):
     arrays = pure1_resolve_arrays(module, pure_1, module.params["arrays"])
-    body = simulation_body(module, arrays)
+    body = simulation_body(module, array_names(module, arrays))
     wanted = [metric["name"] for metric in body["metrics"]]
 
-    answer = pure1_response(
-        module,
-        "post_arrays_simulations",
-        lambda: pure_1.post_arrays_simulations(planning_simulation_post=body),
-    )
+    try:
+        answer = pure1_response(
+            module,
+            "post_arrays_simulations",
+            lambda: pure_1.post_arrays_simulations(planning_simulation_post=body),
+            fail=False,
+        )
+    except Pure1RequestError as error:
+        module.fail_json(msg=refusal_text(error, arrays))
     # The answer has one page: a simulation is not listed with a token
     projections = [] if answer.items is None else list(answer.items)
     total = getattr(answer, "total_item_count", None)
@@ -650,8 +730,8 @@ def generate_simulation_dict(module, pure_1):
         # py-pure-client hands on no more items than Pure1 counts, and the
         # length of the items is the number that came when the count is 0
         module.warn(
-            "Pure1 sent {0} projections and counted none: they cannot be "
-            "read and are not in the result.".format(len(answer.items))
+            "Projections that Pure1 sent and counted as none cannot be read "
+            "and are left out of the result: {0}.".format(len(answer.items))
         )
 
     # Every array of the task is in the result, with or without a projection
@@ -706,25 +786,23 @@ def generate_simulation_dict(module, pure_1):
                 several += 1
     if same_name:
         module.warn(
-            "Pure1 lists {0} arrays under a name that an earlier array of this "
-            "task has: they and their projections are left out of the "
-            "result.".format(same_name)
+            "Arrays that carry the name of another array of the task are left "
+            "out of the result with their projections: {0}.".format(same_name)
         )
     if left_out:
         module.warn(
-            "Pure1 returned {0} projections without a metric or without an "
-            "array of this task: they are left out of the result.".format(left_out)
+            "Projections that Pure1 returned for no array and metric of the "
+            "task are left out of the result: {0}.".format(left_out)
         )
     if repeated:
         module.warn(
-            "Pure1 returned {0} projections of a metric that the array already "
-            "has a projection of: only the first of each is in the "
-            "result.".format(repeated)
+            "Projections that Pure1 returned after another one of the same "
+            "array and metric are left out of the result: {0}.".format(repeated)
         )
     if several:
         module.warn(
-            "Pure1 returned {0} projections that name more than one array: "
-            "each is in the result of the first array it names only.".format(several)
+            "Projections that name more than one array are in the result of "
+            "the first array they name only: {0}.".format(several)
         )
     return {"request": request_row(body), "arrays": arrays_info}
 
@@ -740,12 +818,11 @@ def main():
             aggregation=dict(type="str", choices=AGGREGATIONS),
             projection_days=dict(type="int"),
             training_days=dict(type="int"),
-            resolution=dict(type="int"),
         )
     )
     module = AnsibleModule(argument_spec, supports_check_mode=True)
     check_options(module)
-    pure_1 = get_pure1(module)
+    pure_1 = get_pure1(module, version=REST_VERSION)
     pure1_require(module, pure_1, "post_arrays_simulations", "1.99.0")
 
     module.exit_json(
