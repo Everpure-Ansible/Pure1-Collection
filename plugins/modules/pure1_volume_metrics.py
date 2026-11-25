@@ -175,7 +175,7 @@ pure1_volume_metrics:
       type: dict
       contains:
         id:
-          description: The globally unique Pure1 ID (NAID) of the volume
+          description: The globally unique Pure1 ID (UUID) of the volume
           type: str
         name:
           description: The volume name
