@@ -115,6 +115,7 @@ Per-release notes can be found on the
 - pure1_audits - Collect audit records from Pure1
 - pure1_buckets - Collect object store accounts and their buckets from Pure1
 - pure1_controllers - Collect array controllers information from Pure1
+- pure1_cves - Collect CVEs and the arrays they affect from Pure1
 - pure1_drives - Get array drives information from Pure1
 - pure1_file_systems - Collect file systems information from Pure1
 - pure1_fleets - Collect fleets and their members from Pure1
@@ -128,6 +129,7 @@ Per-release notes can be found on the
 - pure1_ports - Get port information from Pure1
 - pure1_recommendations - Collect the recommendations of Pure1
 - pure1_replica_links - Collect replica links and replication targets from Pure1
+- pure1_security - Collect the security assessment of arrays from Pure1
 - pure1_topology_groups - Collect the topology groups of fleets from Pure1
 - pure1_volume_metrics - Get FlashArray volume metrics from Pure1
 - pure1_volumes - Get FlashArray volume information from Pure1
