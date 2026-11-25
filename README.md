@@ -111,6 +111,7 @@ Per-release notes can be found on the
 
 - pure1_alerts - Get alerts from Pure1
 - pure1_array_tags - Manage array tags for managed devices in Pure1
+- pure1_arrays - Collect the arrays of the organization from Pure1
 - pure1_audits - Collect audit records from Pure1
 - pure1_buckets - Collect object store accounts and their buckets from Pure1
 - pure1_controllers - Collect array controllers information from Pure1
